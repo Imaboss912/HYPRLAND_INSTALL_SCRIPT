@@ -134,8 +134,9 @@ pacman -S --needed --noconfirm \
 # --- 7. Audio Stack (PipeWire — full) ---
 # =========================================================
 log "--- Installing PipeWire audio stack ---"
+# pipewire-jack omitted — cachyos-gaming-meta installs jack which conflicts with it.
 pacman -S --needed --noconfirm \
-    pipewire pipewire-audio pipewire-alsa pipewire-pulse pipewire-jack \
+    pipewire pipewire-audio pipewire-alsa pipewire-pulse \
     wireplumber pavucontrol pamixer playerctl
 
 # =========================================================
