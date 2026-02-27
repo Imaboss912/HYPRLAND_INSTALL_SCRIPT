@@ -124,13 +124,12 @@ fi
 # --- 6. Graphics Stack (RDNA3 / RADV) ---
 # =========================================================
 log "--- Installing Graphics Stack (RADV) ---"
-# mesa and lib32-mesa are intentionally omitted here — cachyos-gaming-meta already
-# installs mesa-git (a newer CachyOS-optimised build) which conflicts with stable mesa.
-# Installing vulkan layers, VA-API, gamescope and ffmpeg on top of that.
+# cachyos-gaming-meta installs mesa-git which already provides:
+#   mesa, lib32-mesa, libva-mesa-driver, lib32-libva-mesa-driver
+# We only install packages that mesa-git does NOT provide.
 pacman -S --needed --noconfirm \
     vulkan-radeon lib32-vulkan-radeon \
     vulkan-tools vulkan-mesa-layers lib32-vulkan-mesa-layers \
-    libva-mesa-driver lib32-libva-mesa-driver \
     gamescope ffmpeg
 
 # =========================================================
