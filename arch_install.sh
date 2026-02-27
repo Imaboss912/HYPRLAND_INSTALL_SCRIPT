@@ -25,13 +25,23 @@ LOGFILE="/var/log/arch_install.log"
 exec > >(while IFS= read -r line; do echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" | tee -a "$LOGFILE"; done)
 exec 2>&1
 
+# prompt_user "Question text" VARIABLE_NAME
+# Writes prompts directly to /dev/tty so they appear on the terminal even though
+# stdout/stderr are redirected through the timestamped logging pipe above.
+prompt_user() {
+    local __prompt="$1"
+    local __var="$2"
+    printf '%s' "$__prompt" > /dev/tty
+    read "$__var" < /dev/tty
+}
+
 echo "=== System Setup for $TARGET_USER (CPU: Zen 3 | GPU: RDNA3) ==="
 
 # =========================================================
 # --- 1. Mirror Country Selection ---
 # =========================================================
 echo ""
-read -p "Enter your country for mirror optimization (e.g. US, GB, DE, AU) [default: US]: " MIRROR_COUNTRY
+prompt_user "Enter your country for mirror optimization (e.g. US, GB, DE, AU) [default: US]: " MIRROR_COUNTRY
 MIRROR_COUNTRY="${MIRROR_COUNTRY:-US}"
 echo "Using mirror country: $MIRROR_COUNTRY"
 
@@ -126,7 +136,8 @@ else
     echo "WARNING: Could not detect GRUB or systemd-boot."
     echo "  If using systemd-boot for the first time: bootctl install"
     echo "  If using GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
-    read -p "Press Enter to continue anyway, then fix your bootloader before rebooting..."
+    local _ignored
+    prompt_user "Press Enter to continue anyway, then fix your bootloader before rebooting..." _ignored
 fi
 
 # =========================================================
@@ -231,14 +242,14 @@ echo "Detected hyprpolkit binary: $HYPRPOLKIT_BIN"
 # cachyos-gaming-meta was already installed in step 4.
 # This prompt covers the full Steam / Lutris / Wine layer on top.
 echo ""
-read -p "Install full Gaming Stack (Steam / Lutris / Wine)? (y/N): " install_games
+prompt_user "Install full Gaming Stack (Steam / Lutris / Wine)? (y/N): " install_games
 if [[ "$install_games" =~ ^[Yy]$ ]]; then
     echo "--- Installing Gaming Stack ---"
     pacman -S --needed --noconfirm steam lutris wine-staging winetricks wine-mono
 
     # RDNA3 ROCm support for LM Studio GPU acceleration (optional heavy install ~2 GB)
     echo ""
-    read -p "Install ROCm / HIP for LM Studio GPU acceleration on RDNA3? (y/N): " install_rocm
+    prompt_user "Install ROCm / HIP for LM Studio GPU acceleration on RDNA3? (y/N): " install_rocm
     if [[ "$install_rocm" =~ ^[Yy]$ ]]; then
         echo "--- Installing ROCm HIP SDK ---"
         pacman -S --needed --noconfirm rocm-hip-sdk
@@ -1019,5 +1030,5 @@ echo "      (should read 'amd-pstate-epp')"
 echo "    - Log in via ly and enjoy Hyprland"
 echo "============================================="
 echo ""
-read -p "Reboot now? (y/N): " reboot_choice
+prompt_user "Reboot now? (y/N): " reboot_choice
 [[ "$reboot_choice" =~ ^[Yy]$ ]] && reboot
