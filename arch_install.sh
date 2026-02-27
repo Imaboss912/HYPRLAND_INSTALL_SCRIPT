@@ -246,7 +246,7 @@ sudo -u "$TARGET_USER" xdg-user-dirs-update
 
 # scx is a system-level scheduler daemon — belongs as a systemd service only,
 # never as exec-once inside Hyprland.
-systemctl enable --now scx
+systemctl enable --now scx_loader
 
 # Process priority management
 systemctl enable --now ananicy-cpp
