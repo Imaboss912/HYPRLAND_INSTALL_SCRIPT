@@ -969,11 +969,17 @@ echo "wofi config written."
 # --- 16. Enable Login Manager ---
 # =========================================================
 # ly is in the CachyOS/AUR repos — install if not already present
-if ! command -v ly &> /dev/null; then
-    pacman -S --needed --noconfirm ly 2>/dev/null || \
-        sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild ly
+# Reload daemon to ensure newly installed services are seen
+sudo systemctl daemon-reload
+
+# Enable Ly only if the unit file was actually created
+if [ -f /usr/lib/systemd/system/ly.service ]; then
+    sudo systemctl enable ly.service
+    # Only disable getty if ly is actually ready
+    sudo systemctl disable getty@tty1.service || true
+else
+    echo "Warning: ly.service not found. You may need to install/enable a DM manually."
 fi
-systemctl enable ly
 
 # Final summary
 
