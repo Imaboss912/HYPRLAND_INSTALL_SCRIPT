@@ -258,7 +258,7 @@ systemctl enable --now bluetooth
 systemctl disable getty@tty1 || true
 
 # PipeWire must be enabled at the user level to autostart properly in Hyprland sessions
-sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
+sudo systemctl --global enable pipewire pipewire-pulse wireplumber
 
 # --- zram ---
 # Configure zram for improved responsiveness under heavy loads on high-RAM systems.
