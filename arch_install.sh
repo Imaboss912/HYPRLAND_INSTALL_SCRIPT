@@ -973,12 +973,18 @@ echo "wofi config written."
 sudo systemctl daemon-reload
 
 # Enable Ly only if the unit file was actually created
-if [ -f /usr/lib/systemd/system/ly.service ]; then
-    sudo systemctl enable ly.service
-    # Only disable getty if ly is actually ready
-    sudo systemctl disable getty@tty1.service || true
+if [ -f /usr/lib/systemd/system/ly@.service ]; then
+    # Disable and optionally mask the default getty on the chosen tty to avoid conflicts
+    # (tty2 is the most common/recommended for Wayland setups like Hyprland)
+    sudo systemctl disable --now getty@tty2.service || true
+    sudo systemctl mask getty@tty2.service || true   # Recommended: prevents accidental starts
+
+    # Enable LY on tty2 (change to tty1/tty3/... if preferred, and adjust getty line above)
+    sudo systemctl enable ly@tty2.service
+    
 else
-    echo "Warning: ly.service not found. You may need to install/enable a DM manually."
+    echo "Warning: ly@.service template not found. LY may not be installed correctly — install 'ly' package and try again."
+    echo "You may need to enable a display manager manually (e.g. ly@tty2.service)."
 fi
 
 # Final summary
