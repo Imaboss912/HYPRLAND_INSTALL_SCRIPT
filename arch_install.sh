@@ -21,8 +21,8 @@ TARGET_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 LOGFILE="/var/log/arch_install.log"
 
-# Simple timestamped logger — writes to terminal AND logfile.
-# All other processes (pacman, interactive scripts) run normally with full terminal access.
+# Simple timestamped logger — writes to terminal AND logfile without redirecting
+# stdout/stderr, so pacman, interactive scripts and prompts all work normally.
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
@@ -37,7 +37,7 @@ log "=== System Setup for $TARGET_USER (CPU: Zen 3 | GPU: RDNA3) ==="
 echo ""
 read -p "Enter your country for mirror optimization (e.g. US, GB, DE, AU) [default: US]: " MIRROR_COUNTRY
 MIRROR_COUNTRY="${MIRROR_COUNTRY:-US}"
-echo "Using mirror country: $MIRROR_COUNTRY"
+log "Using mirror country: $MIRROR_COUNTRY"
 
 # =========================================================
 # --- 2. Base Updates & Mirror Optimization ---
@@ -46,7 +46,8 @@ log "--- Updating system & optimizing mirrors ---"
 pacman -Syu --noconfirm
 pacman -S --needed --noconfirm \
     reflector git base-devel curl rsync \
-    unzip zip tar wget p7zip unrar
+    unzip zip tar wget p7zip unrar \
+    nano cpio
 
 reflector --country "$MIRROR_COUNTRY" --protocol https --latest 15 --sort rate --save /etc/pacman.d/mirrorlist
 
@@ -63,11 +64,7 @@ pacman -Syy --noconfirm
 log "--- Adding CachyOS Repos ---"
 curl -L https://mirror.cachyos.org/cachyos-repo.tar.xz -o /tmp/cachyos-repo.tar.xz
 
-# Fetch and verify the upstream-published checksum dynamically.
-# Validates that the fetched value looks like a real SHA256 hash (64 hex chars)
-# before comparing — avoids false aborts when the mirror returns a 404 HTML page.
 log "--- Extracting CachyOS repo setup ---"
-
 tar xvf /tmp/cachyos-repo.tar.xz -C /tmp
 
 # Subshell so cd cannot affect the rest of the script
@@ -79,19 +76,19 @@ tar xvf /tmp/cachyos-repo.tar.xz -C /tmp
 
 # Verify the CachyOS script did not silently fail
 if ! grep -q '\[cachyos\]' /etc/pacman.conf; then
-    echo "ERROR: CachyOS repo setup appears to have failed — [cachyos] not found in pacman.conf."
+    log "ERROR: CachyOS repo setup appears to have failed — [cachyos] not found in pacman.conf."
     exit 1
 fi
 
 rm -rf /tmp/cachyos-repo*
 
-# CachyOS repos now active — install meta packages.
-# Note: yay should now be available via CachyOS repos. If it fails, we fall back to
-# building it manually from AUR so the rest of the script can continue.
+# cachyos-gaming-meta brings in a full optimised graphics/wine/jack stack (mesa-git,
+# vulkan-radeon-git, wine, jack etc.). Do NOT install conflicting stable versions later.
 pacman -Syu --needed --noconfirm cachyos-settings cachyos-hooks cachyos-gaming-meta
 
+# yay should now be available via CachyOS repos. Fall back to building from AUR if not.
 if ! pacman -S --needed --noconfirm yay 2>/dev/null; then
-    echo "WARNING: yay not found in CachyOS repos — building from AUR as fallback."
+    log "WARNING: yay not found in CachyOS repos — building from AUR as fallback."
     (
         BUILDDIR=$(sudo -u "$TARGET_USER" mktemp -d)
         sudo -u "$TARGET_USER" git clone https://aur.archlinux.org/yay.git "$BUILDDIR/yay"
@@ -113,25 +110,25 @@ if command -v grub-mkconfig &> /dev/null; then
 elif [ -d "/boot/loader/entries" ]; then
     bootctl --path=/boot update
 else
-    echo ""
-    echo "WARNING: Could not detect GRUB or systemd-boot."
-    echo "  If using systemd-boot for the first time: bootctl install"
-    echo "  If using GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
+    log "WARNING: Could not detect GRUB or systemd-boot."
+    log "  If using systemd-boot for the first time: bootctl install"
+    log "  If using GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
     read -p "Press Enter to continue anyway, then fix your bootloader before rebooting..."
 fi
 
 # =========================================================
-# --- 6. Graphics Stack (RDNA3 / RADV) ---
+# --- 6. Graphics Stack extras ---
 # =========================================================
 log "--- Installing Graphics Stack extras ---"
-# cachyos-gaming-meta covers the full mesa/vulkan/radeon/libva stack via git builds.
-# We only install tools and utilities that sit on top of it.
+# cachyos-gaming-meta already provides the full mesa-git/vulkan-radeon-git/libva stack.
+# Only add tools that sit on top — no mesa/vulkan/libva packages here as they conflict
+# with the git builds cachyos-gaming-meta installed.
 pacman -S --needed --noconfirm \
     vulkan-tools \
     gamescope ffmpeg
 
 # =========================================================
-# --- 7. Audio Stack (PipeWire — full) ---
+# --- 7. Audio Stack (PipeWire) ---
 # =========================================================
 log "--- Installing PipeWire audio stack ---"
 # pipewire-jack omitted — cachyos-gaming-meta installs jack which conflicts with it.
@@ -143,8 +140,8 @@ pacman -S --needed --noconfirm \
 # --- 8. Qt / Wayland Integration ---
 # =========================================================
 log "--- Installing Qt Wayland support ---"
-# qt6ct-kde (AUR, installed later) replaces and conflicts with vanilla qt6ct,
-# so we only install the Wayland platform plugins here and let the AUR handle theming.
+# qt6ct-kde (AUR, installed later) replaces vanilla qt6ct.
+# Only install Wayland platform plugins here.
 pacman -S --needed --noconfirm qt5-wayland qt6-wayland
 
 # =========================================================
@@ -169,10 +166,9 @@ pacman -S --needed --noconfirm \
     zram-generator \
     blueman network-manager-applet
 
-# ananicy-cpp: present in CachyOS repos. If pacman can't find it, yay picks it up
-# in the AUR section below — the --needed flag on yay will skip it if already installed.
+# ananicy-cpp: present in CachyOS repos. Falls back to yay if not found.
 pacman -S --needed --noconfirm ananicy-cpp || \
-    echo "ananicy-cpp not in repos — will install via yay in AUR section."
+    log "ananicy-cpp not in repos — will install via yay in AUR section."
 
 # =========================================================
 # --- 10. Productivity Apps ---
@@ -185,11 +181,6 @@ pacman -S --needed --noconfirm \
 # --- 11. AUR Packages ---
 # =========================================================
 log "--- Installing AUR packages (running as $TARGET_USER) ---"
-# AUR installs must always run as the non-root user.
-# hyprpolkit: AUR package name is 'hyprpolkit'. If the build fails, verify the
-# current name with: yay -Ss hyprpolkit  (it has also been called hyprpolkit-agent).
-# qt6ct-kde: replaces vanilla qt6ct for better KDE/Qt app theming on Wayland.
-# ananicy-cpp: included here as a fallback if the pacman install above was skipped.
 sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
     hyprshot \
     hyprpolkit \
@@ -201,38 +192,32 @@ sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
     kew-git \
     stremio
 
-# Auto-detect the correct hyprpolkit binary name — the AUR package has shipped as
-# both 'hyprpolkit' and 'hyprpolkit-agent' across versions. We probe for whichever
-# exists and store it so the Hyprland config injection below uses the right name.
+# Auto-detect the correct hyprpolkit binary name
 if command -v hyprpolkit-agent &> /dev/null; then
     HYPRPOLKIT_BIN="hyprpolkit-agent"
 elif command -v hyprpolkit &> /dev/null; then
     HYPRPOLKIT_BIN="hyprpolkit"
 else
-    echo "WARNING: Neither 'hyprpolkit' nor 'hyprpolkit-agent' found in PATH."
-    echo "  Defaulting exec-once to 'hyprpolkit' — adjust hyprland.conf if needed."
+    log "WARNING: Neither 'hyprpolkit' nor 'hyprpolkit-agent' found in PATH."
+    log "  Defaulting exec-once to 'hyprpolkit' — adjust hyprland.conf if needed."
     HYPRPOLKIT_BIN="hyprpolkit"
 fi
-echo "Detected hyprpolkit binary: $HYPRPOLKIT_BIN"
+log "Detected hyprpolkit binary: $HYPRPOLKIT_BIN"
 
 # =========================================================
 # --- 12. Gaming Stack (Optional) ---
 # =========================================================
-# cachyos-gaming-meta was already installed in step 4.
-# This prompt covers the full Steam / Lutris / Wine layer on top.
 echo ""
-read -p "Install full Gaming Stack (Steam / Lutris / Wine)? (y/N): " install_games
+read -p "Install Gaming Stack (Steam / Lutris)? (y/N): " install_games
 if [[ "$install_games" =~ ^[Yy]$ ]]; then
-    echo "--- Installing Gaming Stack ---"
-    # wine-staging, winetricks and wine-mono omitted — cachyos-gaming-meta already
-    # installs its own optimised wine build which conflicts with these.
+    log "--- Installing Gaming Stack ---"
+    # wine/winetricks omitted — cachyos-gaming-meta already installs its own wine build.
     pacman -S --needed --noconfirm steam lutris
 
-    # RDNA3 ROCm support for LM Studio GPU acceleration (optional heavy install ~2 GB)
     echo ""
     read -p "Install ROCm / HIP for LM Studio GPU acceleration on RDNA3? (y/N): " install_rocm
     if [[ "$install_rocm" =~ ^[Yy]$ ]]; then
-        echo "--- Installing ROCm HIP SDK ---"
+        log "--- Installing ROCm HIP SDK ---"
         pacman -S --needed --noconfirm rocm-hip-sdk
     fi
 fi
@@ -244,25 +229,13 @@ log "--- Enabling system services ---"
 loginctl enable-linger "$TARGET_USER"
 sudo -u "$TARGET_USER" xdg-user-dirs-update
 
-# scx is a system-level scheduler daemon — belongs as a systemd service only,
-# never as exec-once inside Hyprland.
-systemctl enable --now scx_loader
-
-# Process priority management
+systemctl enable --now scx
 systemctl enable --now ananicy-cpp
-
-# Bluetooth
 systemctl enable --now bluetooth
-
-# Disable the getty on tty1 to avoid a stray console behind the ly greeter
 systemctl disable getty@tty1 || true
-
-# PipeWire must be enabled at the user level to autostart properly in Hyprland sessions
-sudo systemctl --global enable pipewire pipewire-pulse wireplumber
+sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
 
 # --- zram ---
-# Configure zram for improved responsiveness under heavy loads on high-RAM systems.
-# Uses lz4 compression — fast with good ratio, ideal for Zen 3.
 if [ ! -f /etc/systemd/zram-generator.conf ]; then
     cat <<'EOF' > /etc/systemd/zram-generator.conf
 [zram0]
@@ -270,59 +243,49 @@ zram-size = ram / 2
 compression-algorithm = lz4
 swap-priority = 100
 EOF
-    echo "zram-generator configured (ram/2, lz4)."
+    log "zram-generator configured (ram/2, lz4)."
 fi
 systemctl daemon-reload
 systemctl enable --now systemd-zram-setup@zram0.service
 
 # --- amd_pstate ---
-# Zen 3 benefits significantly from amd_pstate=active (EPP driver).
-# Check if already set; if not, patch GRUB or advise for systemd-boot.
 PSTATE_CURRENT=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo "unknown")
 if [[ "$PSTATE_CURRENT" != "amd-pstate-epp" ]]; then
-    echo "--- amd_pstate not active (current driver: $PSTATE_CURRENT) — applying fix ---"
+    log "--- amd_pstate not active (current driver: $PSTATE_CURRENT) — applying fix ---"
     if command -v grub-mkconfig &> /dev/null && [ -f /etc/default/grub ]; then
-        # Inject amd_pstate=active if not already present in GRUB_CMDLINE_LINUX_DEFAULT
         if ! grep -q 'amd_pstate=active' /etc/default/grub; then
             sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 amd_pstate=active"/' /etc/default/grub
             grub-mkconfig -o /boot/grub/grub.cfg
-            echo "amd_pstate=active added to GRUB_CMDLINE_LINUX_DEFAULT and grub.cfg regenerated."
+            log "amd_pstate=active added to GRUB_CMDLINE_LINUX_DEFAULT."
         fi
     elif [ -d "/boot/loader/entries" ]; then
-        echo "NOTE (systemd-boot): Manually add 'amd_pstate=active' to your kernel options in"
-        echo "  /boot/loader/entries/<your-entry>.conf — look for the 'options' line."
+        log "NOTE (systemd-boot): Manually add 'amd_pstate=active' to your kernel options in"
+        log "  /boot/loader/entries/<your-entry>.conf — look for the 'options' line."
     fi
 else
-    echo "amd_pstate EPP driver already active — no changes needed."
+    log "amd_pstate EPP driver already active — no changes needed."
 fi
 
 # --- ly display manager config ---
-# Patch ly's config to ensure Wayland sessions are preferred and the last session
-# is remembered, preventing black screens when ly defaults to an X11 stub.
 LY_CONF="/etc/ly/config.ini"
 if [ -f "$LY_CONF" ]; then
-    # Enable session memory
     sed -i 's/^#\?\s*save_last_session\s*=.*/save_last_session = true/' "$LY_CONF"
-    # Ensure Wayland session directory is set
     grep -q '^waylandsessions' "$LY_CONF" || \
         echo "waylandsessions = /usr/share/wayland-sessions" >> "$LY_CONF"
-    echo "ly config patched (save_last_session + waylandsessions)."
+    log "ly config patched (save_last_session + waylandsessions)."
 else
-    echo "WARNING: /etc/ly/config.ini not found — ly may not be installed yet or path has changed."
-    echo "  After reboot, manually set save_last_session = true and"
-    echo "  waylandsessions = /usr/share/wayland-sessions in /etc/ly/config.ini"
+    log "WARNING: /etc/ly/config.ini not found — ly may not be installed yet or path has changed."
 fi
 
 # =========================================================
-# --- 14. Hyprland Config Injection ---
+# --- 14. Hyprland Config ---
 # =========================================================
 log "--- Writing Hyprland config ---"
 HYPR_CONF="$USER_HOME/.config/hypr/hyprland.conf"
 sudo -u "$TARGET_USER" mkdir -p "$(dirname "$HYPR_CONF")"
 
-# Guard against overwriting on re-runs — only write if the file is empty or missing
 if grep -q "Auto-Injected" "$HYPR_CONF" 2>/dev/null; then
-    echo "Hyprland config already written — skipping to avoid overwrite."
+    log "Hyprland config already written — skipping to avoid overwrite."
 else
     cat <<'EOF' | sudo -u "$TARGET_USER" tee "$HYPR_CONF" > /dev/null
 # =============================================================================
@@ -342,6 +305,23 @@ monitor=DP-3, 2560x1440@143.96, -2560x0, 1
 
 
 # =============================================================================
+# STARTUP (exec-once)
+# Adapted from original config:
+#   - hyprpaper     → swww-daemon  (swww is installed; set wallpaper with `swww img`)
+#   - polkit-gnome  → hyprpolkit   (binary auto-detected by install script)
+#   - redshift      → hyprsunset   (modern Wayland-native replacement)
+# =============================================================================
+
+exec-once = waybar
+exec-once = swww-daemon
+exec-once = fcitx5 -d
+exec-once = HYPRPOLKIT_PLACEHOLDER
+exec-once = hyprsunset -t 4500
+exec-once = swaync
+exec-once = wl-paste --watch cliphist store
+exec-once = nm-applet --indicator
+
+# =============================================================================
 # ENVIRONMENT VARIABLES
 # =============================================================================
 
@@ -351,8 +331,6 @@ env = HYPRCURSOR_SIZE,24
 
 # Input method (fcitx5)
 env = XMODIFIERS,@im=fcitx
-env = GTK_IM_MODULE,fcitx
-env = QT_IM_MODULE,fcitx
 
 # Qt theming — qt6ct-kde is installed; run `qt6ct` after first login to configure.
 # If KDE apps (Okular, Krita) look visually off, re-open qt6ct and select the kde variant.
@@ -365,27 +343,6 @@ env = QT_QPA_PLATFORM,wayland
 # Prevents "GPU not found" errors in LM Studio and other AI workloads.
 # Remove this line if you are not using ROCm.
 env = HSA_OVERRIDE_GFX_VERSION,11.0.0
-
-
-# =============================================================================
-# STARTUP (exec-once)
-# Adapted from original config:
-#   - hyprpaper     → swww-daemon  (swww is installed; set wallpaper with `swww img`)
-#   - polkit-gnome  → hyprpolkit   (binary auto-detected by install script)
-#   - redshift      → hyprsunset   (modern Wayland-native replacement)
-#   - nm-applet     → commented out (network-manager-applet not installed;
-#                     re-add and install if needed: pacman -S network-manager-applet)
-# =============================================================================
-
-exec-once = waybar
-exec-once = swww-daemon
-exec-once = fcitx5 -d
-exec-once = HYPRPOLKIT_PLACEHOLDER
-exec-once = hyprsunset -t 4500
-exec-once = swaync
-exec-once = wl-paste --watch cliphist store
-exec-once = nm-applet --indicator
-
 
 # =============================================================================
 # DEFAULT PROGRAMS
@@ -498,7 +455,7 @@ bind = $mainMod, Return, exec, $terminal
 # Kill focused window
 bind = $mainMod, Q, killactive,
 
-# Screenshot (region) — saved to /tmp; change path as preferred
+# Screenshot (region) → ~/Pictures/Screenshots
 bind = $mainMod SHIFT, S, exec, hyprshot --mode region --output-folder ~/Pictures/Screenshots
 
 # File manager
@@ -513,21 +470,14 @@ bind = $mainMod, F, fullscreen,
 # App launcher
 bind = $mainMod, D, exec, $menu
 
-# Clipboard history (requires cliphist + wl-clipboard, both installed)
+# Clipboard history
 bind = $mainMod, V, exec, cliphist list | wofi --dmenu | cliphist decode | wl-copy
 
 
 # --- Music Controls (kew + playerctl) ---
-# playerctl and kew are installed. These binds are ready to use.
-
-# Play / Pause
 bind = SUPER ALT, P, exec, playerctl --player=kew play-pause
-
-# Next / Previous track
 bind = SUPER ALT, right, exec, playerctl --player=kew next
 bind = SUPER ALT, left,  exec, playerctl --player=kew previous
-
-# Volume up / down (5% steps via PipeWire/pactl — playerctl volume is 0.0–1.0, not pactl syntax)
 bind = SUPER ALT, up,   exec, pactl set-sink-volume @DEFAULT_SINK@ +5%
 bind = SUPER ALT, down, exec, pactl set-sink-volume @DEFAULT_SINK@ -5%
 
@@ -579,10 +529,9 @@ layerrule = ignore_alpha 0.7, match:namespace wofi
 windowrule = no_focus on, match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0
 EOF
 
-    # Patch in the auto-detected hyprpolkit binary name
     sed -i "s/HYPRPOLKIT_PLACEHOLDER/$HYPRPOLKIT_BIN/" "$HYPR_CONF"
     chown "$TARGET_USER:$TARGET_USER" "$HYPR_CONF"
-    echo "hyprland.conf written (hyprpolkit binary: $HYPRPOLKIT_BIN)."
+    log "hyprland.conf written (hyprpolkit binary: $HYPRPOLKIT_BIN)."
 fi
 
 # =========================================================
@@ -628,7 +577,7 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$FASTFETCH_CONF" > /dev/null
 }
 EOF
 chown "$TARGET_USER:$TARGET_USER" "$FASTFETCH_CONF"
-echo "fastfetch config written."
+log "fastfetch config written."
 
 # ---- Kitty ----
 log "--- Writing kitty config ---"
@@ -687,7 +636,7 @@ color7   #f0f0f0
 color15  #e7e7e7
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$KITTY_DIR"
-echo "kitty config written."
+log "kitty config written."
 
 # ---- Waybar ----
 log "--- Writing waybar config ---"
@@ -696,7 +645,7 @@ sudo -u "$TARGET_USER" mkdir -p "$WAYBAR_DIR"
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
 {
-  "layer": "top",
+  "layer": "bot",
   "spacing": 0,
   "height": 0,
   "margin-bottom": 0,
@@ -705,18 +654,25 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
   "margin-right": 370,
   "margin-left": 370,
   "modules-left": [
-    "hyprland/workspaces"
+    "hyprland/workspaces",
+    "sway/workspaces"
   ],
   "modules-center": [
     "custom/applauncher"
   ],
   "modules-right": [
     "network",
+    "battery",
     "pulseaudio",
     "tray",
     "clock"
   ],
   "hyprland/workspaces": {
+    "disable-scroll": true,
+    "all-outputs": false,
+    "tooltip": false
+  },
+  "sway/workspaces": {
     "disable-scroll": true,
     "all-outputs": false,
     "tooltip": false
@@ -746,27 +702,47 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "max-volume": 150,
     "format": "{icon} {volume}%",
     "format-bluetooth": "{icon} {volume}%",
-    "format-icons": ["", "", " "],
+    "format-icons": [
+      "",
+      "",
+      " "
+    ],
     "nospacing": 1,
     "format-muted": " ",
     "on-click": "pavucontrol",
     "tooltip": false
+  },
+  "battery": {
+    "states": {
+      "warning": 30,
+      "critical": 15
+    },
+    "format": "{icon} {capacity}%",
+    "format-charging": "󰂄 {capacity}%",
+    "format-plugged": "󰂄{capacity}%",
+    "format-alt": "{icon} {time}",
+    "format-full": "󱈑 {capacity}%",
+    "format-icons": [
+      "󱊡",
+      "󱊢",
+      "󱊣"
+    ]
   }
 }
 EOF
-# Note: battery module removed — this is a desktop (5900X), not a laptop.
-# Add it back manually if needed.
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/style.css" > /dev/null
 * {
+  /* General taskbar font, I like maple mono ^-^*/
   font-family: Maple Mono;
-  border-radius: 8px;
+  border-radius: 8;
   font-size: 13px;
   padding: 0px;
   background: transparent;
 }
 
 window#waybar {
+  /* Linear gradients are used because it makes less harsh rounded border radius, gtk bug :p */
   background-color: rgba(20, 18, 22, 0.7);
   border-radius: 14px;
   padding: 0px;
@@ -790,11 +766,14 @@ window#waybar {
   border-color: #d8cab8;
   border-width: 1px;
   transition-duration: 120ms;
+  letter-spacing: 3px;
 }
 
+/*  */
 #clock {
   margin-right: 6px;
 }
+
 #clock:hover {
   background-color: rgba(20, 18, 22, 0.7);
   color: #d8cab8;
@@ -809,7 +788,7 @@ window#waybar {
 #custom-applauncher {
   font-weight: bold;
   transition-duration: 120ms;
-  padding: 0px 25px;
+  padding: 0px 25px 0px 25px;
 }
 #custom-applauncher:hover {
   background-color: rgba(20, 18, 22, 0.7);
@@ -845,11 +824,15 @@ window#waybar {
   margin-right: 0.2cm;
   margin-left: 0.2cm;
 }
+
 #workspaces button:hover {
   transition-duration: 120ms;
   color: #8f56e1;
 }
-#workspaces button.focused,
+#workspaces button.focused {
+  color: #ac82e9;
+  font-weight: bold;
+}
 #workspaces button.active {
   color: #ac82e9;
   font-weight: bold;
@@ -870,7 +853,7 @@ window#waybar {
 }
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WAYBAR_DIR"
-echo "waybar config written."
+log "waybar config written."
 
 # ---- Wofi ----
 log "--- Writing wofi config ---"
@@ -963,16 +946,25 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/style.css" > /dev/null
 }
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WOFI_DIR"
-echo "wofi config written."
+log "wofi config written."
+
+# ---- Fastfetch on terminal open ----
+# Adds fastfetch to .bashrc so kitty runs it automatically on every new shell.
+# Only appended once — guarded against re-runs.
+BASHRC="$USER_HOME/.bashrc"
+sudo -u "$TARGET_USER" touch "$BASHRC"
+if ! grep -q "fastfetch auto-run" "$BASHRC"; then
+    cat <<'EOF' | sudo -u "$TARGET_USER" tee -a "$BASHRC" > /dev/null
+
+# fastfetch auto-run — added by arch_install.sh
+fastfetch
+EOF
+    log ".bashrc updated — fastfetch will run on every new kitty terminal."
+fi
 
 # =========================================================
 # --- 16. Enable Login Manager ---
 # =========================================================
-# ly is in the CachyOS/AUR repos — install if not already present
-# Reload daemon to ensure newly installed services are seen
-sudo systemctl daemon-reload
-
-# Enable Ly only if the unit file was actually created
 if [ -f /usr/lib/systemd/system/ly@.service ]; then
     # Disable and optionally mask the default getty on the chosen tty to avoid conflicts
     # (tty2 is the most common/recommended for Wayland setups like Hyprland)
@@ -987,8 +979,6 @@ else
     echo "You may need to enable a display manager manually (e.g. ly@tty2.service)."
 fi
 
-# Final summary
-
 echo ""
 echo "============================================="
 echo "           SETUP COMPLETE"
@@ -996,28 +986,19 @@ echo "============================================="
 echo "  CachyOS performance settings applied."
 echo "  scx systemd service manages Zen 3 scheduling."
 echo "  PipeWire user services enabled."
-echo "  swww-daemon, hyprpolkit, swaync, cliphist in exec-once."
 echo ""
 echo "  App configs written:"
 echo "    - fastfetch  → ~/.config/fastfetch/config.jsonc"
 echo "    - kitty      → ~/.config/kitty/kitty.conf + colors.conf"
 echo "    - waybar     → ~/.config/waybar/config.json + style.css"
 echo "    - wofi       → ~/.config/wofi/config + style.css"
+echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
 echo ""
 echo "  Next steps after reboot:"
-echo "    - Your hyprland.conf has been written with all your keybinds and settings"
 echo "    - Set a wallpaper:  swww img /path/to/wallpaper"
 echo "    - Configure Qt theming: qt6ct"
-echo "      (If KDE apps look off, re-open qt6ct and select the qt6ct-kde variant)"
-echo "    - Test Vulkan:      vkcube"
-echo "    - Test VA-API:      vainfo"
-echo "    - SUPER+V is bound to cliphist (wl-clipboard already installed)"
-echo "    - Music controls (SUPER+ALT+P/Left/Right/Up/Down) are live via kew+playerctl"
-echo "    - hyprsunset starts at 4500K — adjust the -t value in hyprland.conf if needed"
-echo "    - ROCm / LM Studio: HSA_OVERRIDE_GFX_VERSION=11.0.0 is pre-set in hyprland.conf"
-echo "      For multi-GPU: add env = HIP_VISIBLE_DEVICES,0 (replace 0 with your card index)"
-echo "    - zram configured at ram/2 with lz4 — adjust /etc/systemd/zram-generator.conf if needed"
-echo "    - amd_pstate: verify with: cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver"
+echo "    - Test Vulkan: vkcube  |  Test VA-API: vainfo"
+echo "    - amd_pstate check: cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver"
 echo "      (should read 'amd-pstate-epp')"
 echo "    - Log in via ly and enjoy Hyprland"
 echo "============================================="
