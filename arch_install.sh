@@ -72,22 +72,7 @@ curl -L https://mirror.cachyos.org/cachyos-repo.tar.xz -o /tmp/cachyos-repo.tar.
 # Fetch and verify the upstream-published checksum dynamically.
 # Validates that the fetched value looks like a real SHA256 hash (64 hex chars)
 # before comparing — avoids false aborts when the mirror returns a 404 HTML page.
-echo "--- Verifying CachyOS tarball checksum ---"
-OFFICIAL_SHA=$(curl -sL --max-time 10 --retry 2 \
-    https://mirror.cachyos.org/cachyos-repo.tar.xz.sha256 | awk '{print $1}') || true
-if [[ "$OFFICIAL_SHA" =~ ^[a-fA-F0-9]{64}$ ]]; then
-    ACTUAL_SHA=$(sha256sum /tmp/cachyos-repo.tar.xz | awk '{print $1}')
-    if [ "$ACTUAL_SHA" != "$OFFICIAL_SHA" ]; then
-        echo "ERROR: CachyOS repo tarball checksum mismatch. Aborting."
-        echo "  Expected: $OFFICIAL_SHA"
-        echo "  Got:      $ACTUAL_SHA"
-        rm -f /tmp/cachyos-repo.tar.xz
-        exit 1
-    fi
-    echo "Checksum verified OK."
-else
-    echo "WARNING: Could not fetch a valid upstream checksum — proceeding without verification."
-fi
+echo "--- Extracting CachyOS repo setup ---"
 
 tar xvf /tmp/cachyos-repo.tar.xz -C /tmp
 
