@@ -224,7 +224,9 @@ echo ""
 read -p "Install full Gaming Stack (Steam / Lutris / Wine)? (y/N): " install_games
 if [[ "$install_games" =~ ^[Yy]$ ]]; then
     echo "--- Installing Gaming Stack ---"
-    pacman -S --needed --noconfirm steam lutris wine-staging winetricks wine-mono
+    # wine-staging, winetricks and wine-mono omitted — cachyos-gaming-meta already
+    # installs its own optimised wine build which conflicts with these.
+    pacman -S --needed --noconfirm steam lutris
 
     # RDNA3 ROCm support for LM Studio GPU acceleration (optional heavy install ~2 GB)
     echo ""
