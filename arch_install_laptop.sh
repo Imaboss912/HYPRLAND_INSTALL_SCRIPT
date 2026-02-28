@@ -213,7 +213,7 @@ systemctl enable bluetooth
 systemctl disable getty@tty2 || true
 
 # PipeWire at user level
-sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
+sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber || true
 
 # --- zram ---
 if [ ! -f /etc/systemd/zram-generator.conf ]; then
