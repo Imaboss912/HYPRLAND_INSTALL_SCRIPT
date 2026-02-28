@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Arch + CachyOS + Hyprland (2026 Edition)
+# Arch + Hyprland (2026 Edition)
 # Optimized for: Dell Precision M4600 (Intel Sandy Bridge + Quadro 1000M)
 # GPU driver: nouveau (Fermi — proprietary nvidia dropped support after 390xx)
+# Note: CachyOS repos require x86_64_v3 (AVX2) — Sandy Bridge is v2 only.
+#       Using standard Arch repos with linux-lts kernel instead.
 # ---------------------------------------------------------
 set -euo pipefail
 
@@ -64,29 +66,10 @@ grep -q '^ParallelDownloads' /etc/pacman.conf || \
 pacman -Syy --noconfirm
 
 # =========================================================
-# --- 4. CachyOS Repositories ---
+# --- 4. yay (AUR helper) ---
 # =========================================================
-log "--- Adding CachyOS Repos ---"
-curl -L https://mirror.cachyos.org/cachyos-repo.tar.xz -o /tmp/cachyos-repo.tar.xz
-tar xf /tmp/cachyos-repo.tar.xz -C /tmp
-
-(
-    cd /tmp/cachyos-repo
-    chmod +x ./cachyos-repo.sh
-    ./cachyos-repo.sh
-)
-
-if ! grep -q '\[cachyos\]' /etc/pacman.conf; then
-    log "ERROR: CachyOS repo setup failed — [cachyos] not found in pacman.conf."
-    exit 1
-fi
-
-rm -rf /tmp/cachyos-repo*
-
-pacman -Syu --needed --noconfirm cachyos-settings cachyos-hooks
-
-if ! pacman -S --needed --noconfirm yay 2>/dev/null; then
-    log "WARNING: yay not in CachyOS repos — building from AUR as fallback."
+log "--- Installing yay ---"
+if ! command -v yay &> /dev/null; then
     (
         BUILDDIR=$(sudo -u "$TARGET_USER" mktemp -d)
         sudo -u "$TARGET_USER" git clone https://aur.archlinux.org/yay.git "$BUILDDIR/yay"
@@ -94,13 +77,17 @@ if ! pacman -S --needed --noconfirm yay 2>/dev/null; then
         sudo -u "$TARGET_USER" makepkg -si --noconfirm
         rm -rf "$BUILDDIR"
     )
+else
+    log "yay already installed — skipping."
 fi
 
 # =========================================================
 # --- 5. Kernel, Microcode & Bootloader ---
 # =========================================================
-log "--- Installing CachyOS Kernel & Intel Microcode ---"
-pacman -S --needed --noconfirm linux-cachyos linux-cachyos-headers intel-ucode
+log "--- Installing linux-lts kernel & Intel Microcode ---"
+# linux-lts: more stable than mainline, better suited for older hardware.
+# intel-ucode: loads CPU microcode updates at boot — important for Sandy Bridge security fixes.
+pacman -S --needed --noconfirm linux-lts linux-lts-headers intel-ucode
 
 if command -v grub-mkconfig &> /dev/null; then
     grub-mkconfig -o /boot/grub/grub.cfg
@@ -108,6 +95,8 @@ elif [ -d "/boot/loader/entries" ]; then
     bootctl --path=/boot update
 else
     log "WARNING: Could not detect GRUB or systemd-boot."
+    log "  systemd-boot: bootctl install"
+    log "  GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
     read -p "Press Enter to continue, then fix bootloader before rebooting..."
 fi
 
@@ -115,6 +104,8 @@ fi
 # --- 6. Graphics Stack (nouveau / Fermi) ---
 # =========================================================
 log "--- Installing Graphics Stack (nouveau) ---"
+# Quadro 1000M is Fermi (GF108M). Proprietary nvidia support ended at 390xx which
+# is EOL and difficult on Wayland. nouveau via mesa/gallium is the stable choice.
 pacman -S --needed --noconfirm \
     mesa lib32-mesa \
     libva-mesa-driver \
@@ -157,9 +148,6 @@ pacman -S --needed --noconfirm \
     blueman network-manager-applet \
     imagemagick
 
-pacman -S --needed --noconfirm ananicy-cpp || \
-    log "ananicy-cpp not in repos — will install via yay in AUR section."
-
 # =========================================================
 # --- 10. Laptop Power Management ---
 # =========================================================
@@ -186,7 +174,6 @@ sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
     hyprpolkit \
     bitwarden \
     qt6ct-kde \
-    ananicy-cpp \
     ttf-maple \
     kew-git \
     stremio
@@ -208,17 +195,20 @@ log "--- Enabling system services ---"
 loginctl enable-linger "$TARGET_USER"
 sudo -u "$TARGET_USER" xdg-user-dirs-update
 
+# TLP for power saving — mask rfkill services so they don't conflict
 systemctl enable tlp
 systemctl enable tlp-rdw
-systemctl mask systemd-rfkill.service systemctl mask systemd-rfkill.socket || true
+systemctl mask systemd-rfkill.service || true
+systemctl mask systemd-rfkill.socket || true
 
 systemctl enable thermald
 systemctl enable acpid
 systemctl enable bluetooth
-systemctl enable ananicy-cpp
 
+# ly runs on tty2 — disable getty@tty2 to free it up
 systemctl disable getty@tty2 || true
 
+# PipeWire at user level
 sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
 
 # --- zram ---
@@ -235,6 +225,7 @@ systemctl daemon-reload
 systemctl enable --now systemd-zram-setup@zram0.service
 
 # --- Intel power saving kernel params ---
+# Sandy Bridge supports i915 power saving features.
 if command -v grub-mkconfig &> /dev/null && [ -f /etc/default/grub ]; then
     NEEDS_UPDATE=0
     if ! grep -q 'i915.enable_psr=1' /etc/default/grub; then
@@ -285,6 +276,7 @@ else
 
 # =============================================================================
 # MONITORS
+# eDP-1 is the internal laptop display. Run `hyprctl monitors all` to confirm.
 # =============================================================================
 
 monitor=eDP-1, 1920x1080@60, 0x0, 1
@@ -317,7 +309,10 @@ env = XMODIFIERS,@im=fcitx
 env = QT_QPA_PLATFORMTHEME,qt6ct
 env = QT_QPA_PLATFORM,wayland
 
+# nouveau requires software cursors on Wayland
 env = WLR_NO_HARDWARE_CURSORS,1
+
+# Ensure nouveau is used for VA-API (limited on Fermi but available)
 env = LIBVA_DRIVER_NAME,nouveau
 
 
@@ -924,15 +919,16 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/weather.sh" > /dev/null
 
 LAT="33.9806"
 LON="-117.3755"
+CACHE_FILE="$HOME/.cache/waybar_weather.txt"
 
-for i in $(seq 1 10); do
-    data=$(curl -sf --max-time 5 "https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON&current_weather=true&temperature_unit=fahrenheit" 2>/dev/null)
-    [ -n "$data" ] && break
-    sleep 3
-done
+data=$(curl -sf --max-time 5 "https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON&current_weather=true&temperature_unit=fahrenheit" 2>/dev/null)
 
 if [ -z "$data" ]; then
-    echo "N/A"
+    if [ -f "$CACHE_FILE" ]; then
+        cat "$CACHE_FILE"
+    else
+        echo "N/A"
+    fi
     exit 0
 fi
 
@@ -950,7 +946,9 @@ case $code in
     *) condition="Unknown" icon="󰖔" ;;
 esac
 
-echo "$icon  ${temp}°F $condition"
+result="$icon  ${temp}°F $condition"
+echo "$result" > "$CACHE_FILE"
+echo "$result"
 EOF
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/wallpaper_picker.sh" > /dev/null
@@ -1129,7 +1127,8 @@ echo ""
 echo "============================================="
 echo "           SETUP COMPLETE"
 echo "============================================="
-echo "  CachyOS performance settings applied."
+echo "  Standard Arch repos (no CachyOS — Sandy Bridge is x86_64_v2)."
+echo "  linux-lts kernel installed (stable, better for older hardware)."
 echo "  Intel microcode (intel-ucode) installed."
 echo "  nouveau graphics stack via mesa/gallium."
 echo "  TLP power management enabled."
@@ -1137,12 +1136,12 @@ echo "  PipeWire user services enabled."
 echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist, kew in exec-once."
 echo ""
 echo "  App configs written:"
-echo "    - fastfetch   → ~/.config/fastfetch/config.jsonc (includes battery)"
-echo "    - kitty       → ~/.config/kitty/kitty.conf + colors.conf"
-echo "    - waybar      → ~/.config/waybar/config.json + style.css"
+echo "    - fastfetch      → ~/.config/fastfetch/config.jsonc (includes battery)"
+echo "    - kitty          → ~/.config/kitty/kitty.conf + colors.conf"
+echo "    - waybar         → ~/.config/waybar/config.json + style.css"
 echo "    - waybar scripts → scroll_text.sh, weather.sh, wallpaper_picker.sh"
-echo "    - wofi        → ~/.config/wofi/config + style.css"
-echo "    - swaync      → ~/.config/swaync/config.json (kew notifications silenced)"
+echo "    - wofi           → ~/.config/wofi/config + style.css"
+echo "    - swaync         → ~/.config/swaync/config.json (kew notifications silenced)"
 echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
 echo "    - Screenshots pre-created at ~/Pictures/Screenshots"
 echo "    - Wallpapers directory pre-created at ~/Pictures/wallpapers"
