@@ -146,7 +146,8 @@ pacman -S --needed --noconfirm \
     gparted smartmontools transmission-qt \
     zram-generator \
     blueman network-manager-applet \
-    imagemagick
+    imagemagick \
+    flatpak
 
 # =========================================================
 # --- 10. Laptop Power Management ---
@@ -175,8 +176,12 @@ sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
     bitwarden \
     qt6ct-kde \
     ttf-maple \
-    kew-git \
-    stremio
+    kew-git
+
+# Stremio via Flatpak — avoids compiling qt5-webengine which fails on low-RAM machines
+log "--- Installing Flatpak apps ---"
+flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install -y flathub com.stremio.Stremio
 
 if command -v hyprpolkit-agent &> /dev/null; then
     HYPRPOLKIT_BIN="hyprpolkit-agent"
