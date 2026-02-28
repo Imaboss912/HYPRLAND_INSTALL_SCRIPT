@@ -135,6 +135,22 @@ elif [ -d "/boot/loader/entries" ]; then
 fi
 log "GRUB updated with nvidia-drm.modeset=1."
 
+# Write Xorg config to explicitly use nvidia driver
+# Without this, X11 may fall back to modesetting even with nvidia installed
+mkdir -p /etc/X11/xorg.conf.d
+cat <<'EOF' > /etc/X11/xorg.conf.d/20-nvidia.conf
+Section "Device"
+    Identifier "Nvidia Card"
+    Driver     "nvidia"
+    VendorName "NVIDIA Corporation"
+    BoardName  "Quadro 1000M"
+    Option     "NoLogo" "1"
+    Option     "RenderAccel" "1"
+    Option     "TripleBuffer" "1"
+EndSection
+EOF
+log "Xorg nvidia config written to /etc/X11/xorg.conf.d/20-nvidia.conf"
+
 # Quick smoke test (non-fatal -- driver may not be active until reboot)
 if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
     log "SUCCESS: nvidia-smi reports driver loaded."
@@ -1021,6 +1037,24 @@ EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$KITTY_DIR"
 log "kitty config written."
 
+# ---- xprofile (fcitx5 input method env vars + X11 cursor) ----
+log "--- Writing ~/.xprofile ---"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$USER_HOME/.xprofile" > /dev/null
+# fcitx5 input method — required for Japanese input in GTK/Qt apps on X11
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS=@im=fcitx
+
+# Qt platform
+export QT_QPA_PLATFORM=xcb
+
+# Cursor
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+EOF
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.xprofile"
+log "~/.xprofile written (fcitx5 env vars set)."
+
 # ---- Fastfetch on terminal open ----
 BASHRC="$USER_HOME/.bashrc"
 sudo -u "$TARGET_USER" touch "$BASHRC"
@@ -1032,6 +1066,18 @@ fastfetch
 EOF
     log ".bashrc updated."
 fi
+
+# ---- .xinitrc fallback (for startx if ly fails) ----
+log "--- Writing ~/.xinitrc fallback ---"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$USER_HOME/.xinitrc" > /dev/null
+#!/bin/sh
+# Fallback: run this with 'startx' if ly display manager fails
+[ -f ~/.xprofile ] && . ~/.xprofile
+exec i3
+EOF
+chmod +x "$USER_HOME/.xinitrc"
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.xinitrc"
+log "~/.xinitrc written (startx fallback)."
 
 # ---- Directories ----
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/Screenshots"
