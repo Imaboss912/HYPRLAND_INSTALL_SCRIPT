@@ -178,7 +178,8 @@ pacman -S --needed --noconfirm \
     btop fastfetch nsxiv filelight \
     gparted smartmontools transmission-qt \
     zram-generator \
-    blueman network-manager-applet
+    blueman network-manager-applet \
+    imagemagick
 
 pacman -S --needed --noconfirm ananicy-cpp || \
     log "ananicy-cpp not in repos — will install via yay in AUR section."
@@ -325,7 +326,8 @@ exec-once = HYPRPOLKIT_PLACEHOLDER
 exec-once = hyprsunset -t 4500
 exec-once = swaync
 exec-once = wl-paste --watch cliphist store
-exec-once = nm-applet --indicator
+exec-once = kew
+
 
 # =============================================================================
 # ENVIRONMENT VARIABLES
@@ -341,6 +343,7 @@ env = QT_QPA_PLATFORM,wayland
 
 # ROCm / HIP: force RDNA3 (gfx1100) target — remove if not using ROCm.
 env = HSA_OVERRIDE_GFX_VERSION,11.0.0
+
 
 # =============================================================================
 # DEFAULT PROGRAMS
@@ -452,6 +455,7 @@ bind = $mainMod SHIFT, SPACE, togglefloating,
 bind = $mainMod, F, fullscreen,
 bind = $mainMod, D, exec, $menu
 bind = $mainMod, V, exec, cliphist list | wofi --dmenu | cliphist decode | wl-copy
+bind = $mainMod, Z, exec, $HOME/.config/waybar/scripts/wallpaper_picker.sh
 
 # Music Controls (kew + playerctl)
 bind = SUPER ALT, P,     exec, playerctl --player=kew play-pause
@@ -629,17 +633,17 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
   "margin-right": 370,
   "margin-left": 370,
   "modules-left": [
-    "hyprland/workspaces",
-    "sway/workspaces"
+    "hyprland/workspaces"
   ],
   "modules-center": [
-    "custom/applauncher"
+    "custom/media"
   ],
   "modules-right": [
+    "custom/wallpaper",
     "network",
-    "battery",
     "pulseaudio",
     "tray",
+    "custom/weather",
     "clock"
   ],
   "hyprland/workspaces": {
@@ -647,14 +651,21 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "all-outputs": false,
     "tooltip": false
   },
-  "sway/workspaces": {
-    "disable-scroll": true,
-    "all-outputs": false,
+  "custom/media": {
+    "format": "󰎈 {}",
+    "exec": "$HOME/.config/waybar/scripts/scroll_text.sh",
+    "on-click": "playerctl -p kew play-pause",
     "tooltip": false
   },
-  "custom/applauncher": {
-    "format": "///",
-    "on-click": "pkill -x wofi || wofi --show drun --location=top -y 10",
+  "custom/wallpaper": {
+    "format": "󰋩",
+    "on-click": "$HOME/.config/waybar/scripts/wallpaper_picker.sh",
+    "tooltip": false
+  },
+  "custom/weather": {
+    "format": "{}",
+    "exec": "$HOME/.config/waybar/scripts/weather.sh",
+    "interval": 900,
     "tooltip": false
   },
   "tray": {
@@ -662,72 +673,55 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "tooltip": false
   },
   "clock": {
-    "format": "󰅐 {:%H:%M}",
+    "format": "󰅐  {:%H:%M}",
     "tooltip": false
   },
   "network": {
-    "format-wifi": " {bandwidthDownBits}",
-    "format-ethernet": " {bandwidthDownBits}",
-    "format-disconnected": "󰤮 No Network",
+    "format-wifi": "  {bandwidthDownBits}",
+    "format-ethernet": "  {bandwidthDownBits}",
+    "format-disconnected": "󰤮  No Network",
     "interval": 5,
     "tooltip": false
   },
   "pulseaudio": {
     "scroll-step": 5,
     "max-volume": 150,
-    "format": "{icon} {volume}%",
-    "format-bluetooth": "{icon} {volume}%",
+    "format": "{icon}  {volume}%",
+    "format-bluetooth": "{icon}  {volume}%",
     "format-icons": [
       "",
       "",
       " "
     ],
     "nospacing": 1,
-    "format-muted": " ",
+    "format-muted": "  ",
     "on-click": "pavucontrol",
     "tooltip": false
-  },
-  "battery": {
-    "states": {
-      "warning": 30,
-      "critical": 15
-    },
-    "format": "{icon} {capacity}%",
-    "format-charging": "󰂄 {capacity}%",
-    "format-plugged": "󰂄{capacity}%",
-    "format-alt": "{icon} {time}",
-    "format-full": "󱈑 {capacity}%",
-    "format-icons": [
-      "󱊡",
-      "󱊢",
-      "󱊣"
-    ]
   }
 }
 EOF
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/style.css" > /dev/null
 * {
-  /* General taskbar font, I like maple mono ^-^*/
   font-family: Maple Mono;
-  border-radius: 8;
-  font-size: 13px;
+  border-radius: 8px;
+  font-size: 15px;
   padding: 0px;
   background: transparent;
 }
 
 window#waybar {
-  /* Linear gradients are used because it makes less harsh rounded border radius, gtk bug :p */
   background-color: rgba(20, 18, 22, 0.7);
   border-radius: 14px;
   padding: 0px;
   border-style: none;
 }
 
-#battery,
 #network,
 #clock,
-#custom-applauncher,
+#custom-media,
+#custom-weather,
+#custom-wallpaper,
 #tray,
 #workspaces,
 #pulseaudio {
@@ -741,10 +735,9 @@ window#waybar {
   border-color: #d8cab8;
   border-width: 1px;
   transition-duration: 120ms;
-  letter-spacing: 3px;
+  letter-spacing: 1px;
 }
 
-/*  */
 #clock {
   margin-right: 6px;
 }
@@ -760,12 +753,34 @@ window#waybar {
   transition-duration: 120ms;
 }
 
-#custom-applauncher {
+#custom-media {
   font-weight: bold;
   transition-duration: 120ms;
   padding: 0px 25px 0px 25px;
+  min-width: 280px;
+  font-family: monospace;
+  color: #ac82e9;
+  border-color: #ac82e9;
 }
-#custom-applauncher:hover {
+
+#custom-media:hover {
+  background-color: rgba(20, 18, 22, 0.7);
+  color: #ac82e9;
+  transition-duration: 120ms;
+}
+
+#custom-wallpaper {
+  transition-duration: 120ms;
+  padding: 0px 8px;
+}
+
+#custom-wallpaper:hover {
+  background-color: rgba(20, 18, 22, 0.7);
+  color: #ac82e9;
+  transition-duration: 120ms;
+}
+
+#custom-weather:hover {
   background-color: rgba(20, 18, 22, 0.7);
   color: #d8cab8;
   transition-duration: 120ms;
@@ -776,16 +791,18 @@ window#waybar {
   color: #d8cab8;
   padding: 4px;
 }
+
 #tray menu menuitem {
-  background-image: linear-gradient(to bottom, #27232b 100%);
+  background-color: #27232b;
   margin: 3px;
   color: #d8cab8;
   border-radius: 4px;
   border-style: solid;
   border-color: #27232b;
 }
+
 #tray menu menuitem:hover {
-  background-image: linear-gradient(to bottom, #27232b 100%);
+  background-color: #27232b;
   color: #ac82e9;
   font-weight: bold;
 }
@@ -804,31 +821,154 @@ window#waybar {
   transition-duration: 120ms;
   color: #8f56e1;
 }
+
 #workspaces button.focused {
   color: #ac82e9;
   font-weight: bold;
 }
+
 #workspaces button.active {
   color: #ac82e9;
   font-weight: bold;
 }
+
 #workspaces button.urgent {
   color: #fcb167;
-}
-
-#battery {
-  background-color: #222222;
-  color: #1d2021;
-}
-#battery.warning,
-#battery.critical,
-#battery.urgent {
-  color: #1d2021;
-  background-color: #fc4649;
 }
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WAYBAR_DIR"
 log "waybar config written."
+
+# ---- Waybar Scripts ----
+log "--- Writing waybar scripts ---"
+SCRIPTS_DIR="$USER_HOME/.config/waybar/scripts"
+sudo -u "$TARGET_USER" mkdir -p "$SCRIPTS_DIR"
+
+# scroll_text.sh — scrolling media info for kew
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/scroll_text.sh" > /dev/null
+#!/bin/bash
+
+PLAYER="kew"
+MAX_LEN=30
+SCROLL_DELAY=0.3
+
+get_text() {
+    playerctl -p "$PLAYER" metadata --format '{{artist}} – {{title}}' 2>/dev/null
+}
+
+text=""
+padded=""
+padded_len=0
+offset=0
+tick=0
+
+while true; do
+    status=$(playerctl -p "$PLAYER" status 2>/dev/null)
+
+    if [ "$status" != "Playing" ] && [ "$status" != "Paused" ]; then
+        echo ""
+        sleep 2
+        continue
+    fi
+
+    if [ $((tick % 10)) -eq 0 ]; then
+        current_text=$(get_text)
+        if [ "$current_text" != "$text" ]; then
+            text="$current_text"
+            padded="$text     "
+            padded_len=${#padded}
+            offset=0
+        fi
+    fi
+
+    chunk="${padded:$offset:$MAX_LEN}"
+    while [ ${#chunk} -lt $MAX_LEN ]; do
+        chunk="$chunk${padded:0:$((MAX_LEN - ${#chunk}))}"
+    done
+
+    if [ "$status" = "Paused" ]; then
+        echo "⏸ $chunk"
+    else
+        echo "$chunk"
+    fi
+
+    offset=$(( (offset + 1) % padded_len ))
+    tick=$((tick + 1))
+    sleep "$SCROLL_DELAY"
+done
+EOF
+
+# weather.sh — current weather for Riverside, CA via Open-Meteo
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/weather.sh" > /dev/null
+#!/bin/bash
+
+LAT="33.9806"
+LON="-117.3755"
+
+# Wait for network, retry up to 10 times
+for i in $(seq 1 10); do
+    data=$(curl -sf --max-time 5 "https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON&current_weather=true&temperature_unit=fahrenheit" 2>/dev/null)
+    [ -n "$data" ] && break
+    sleep 3
+done
+
+if [ -z "$data" ]; then
+    echo "N/A"
+    exit 0
+fi
+
+temp=$(echo "$data" | grep -o '"temperature":[0-9.]*' | tail -1 | cut -d: -f2)
+code=$(echo "$data" | grep -o '"weathercode":[0-9]*' | tail -1 | cut -d: -f2)
+
+case $code in
+    0) condition="Clear"   icon="󰖙" ;;
+    1|2|3) condition="Cloudy"  icon="󰖕" ;;
+    45|48) condition="Foggy"   icon="󰖑" ;;
+    51|53|55|61|63|65) condition="Rainy"   icon="󰖗" ;;
+    71|73|75) condition="Snowy"   icon="󰼶" ;;
+    80|81|82) condition="Showers" icon="󰖖" ;;
+    95|96|99) condition="Stormy"  icon="󰖓" ;;
+    *) condition="Unknown" icon="󰖔" ;;
+esac
+
+echo "$icon  ${temp}°F $condition"
+EOF
+
+# wallpaper_picker.sh — wofi image picker using swww
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/wallpaper_picker.sh" > /dev/null
+#!/bin/bash
+
+WALLPAPER_DIR="$HOME/Pictures/wallpapers"
+CACHE_DIR="$HOME/.cache/wallpaper_thumbs"
+LIST_CACHE="$CACHE_DIR/wofi_list.txt"
+
+mkdir -p "$CACHE_DIR"
+
+# Rebuild list cache only if wallpaper dir is newer than cache
+if [ ! -f "$LIST_CACHE" ] || [ "$WALLPAPER_DIR" -nt "$LIST_CACHE" ]; then
+    > "$LIST_CACHE"
+    find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" \) | while read -r img; do
+        thumb="$CACHE_DIR/$(basename "$img").thumb.png"
+        if [ ! -f "$thumb" ]; then
+            magick "$img"[0] -thumbnail 200x200^ -gravity center -extent 200x200 "$thumb" 2>/dev/null
+        fi
+        echo "img:$thumb:text:$img"
+    done > "$LIST_CACHE"
+fi
+
+selected=$(cat "$LIST_CACHE" | wofi --dmenu --allow-images --prompt "Wallpaper" --location=center)
+
+if [ -n "$selected" ]; then
+    full_path=$(echo "$selected" | sed 's/.*text://')
+    swww img "$full_path" --transition-type wipe --transition-duration 1 --transition-fps 144
+fi
+EOF
+
+chmod +x "$SCRIPTS_DIR/scroll_text.sh"
+chmod +x "$SCRIPTS_DIR/weather.sh"
+chmod +x "$SCRIPTS_DIR/wallpaper_picker.sh"
+chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
+log "waybar scripts written."
 
 # ---- Wofi ----
 log "--- Writing wofi config ---"
@@ -923,6 +1063,24 @@ EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WOFI_DIR"
 log "wofi config written."
 
+# ---- Swaync ----
+log "--- Writing swaync config ---"
+SWAYNC_DIR="$USER_HOME/.config/swaync"
+sudo -u "$TARGET_USER" mkdir -p "$SWAYNC_DIR"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SWAYNC_DIR/config.json" > /dev/null
+{
+  "notification-visibility": {
+    "kew": {
+      "state": "ignored",
+      "app-name": "kew"
+    }
+  }
+}
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$SWAYNC_DIR"
+log "swaync config written."
+
 # ---- Fastfetch on terminal open ----
 BASHRC="$USER_HOME/.bashrc"
 sudo -u "$TARGET_USER" touch "$BASHRC"
@@ -938,6 +1096,10 @@ fi
 # ---- Screenshots directory ----
 # Pre-create so hyprshot doesn't fail silently on first use
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/Screenshots"
+
+# ---- Wallpapers directory ----
+# Pre-create so wallpaper_picker.sh doesn't fail on first use
+sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/wallpapers"
 
 # =========================================================
 # --- 16. Enable Login Manager ---
@@ -956,18 +1118,23 @@ echo "============================================="
 echo "  CachyOS performance settings applied."
 echo "  scx systemd service manages Zen 3 scheduling."
 echo "  PipeWire user services enabled."
-echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist in exec-once."
+echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist, kew in exec-once."
 echo ""
 echo "  App configs written:"
-echo "    - fastfetch  → ~/.config/fastfetch/config.jsonc"
-echo "    - kitty      → ~/.config/kitty/kitty.conf + colors.conf"
-echo "    - waybar     → ~/.config/waybar/config.json + style.css"
-echo "    - wofi       → ~/.config/wofi/config + style.css"
+echo "    - fastfetch     → ~/.config/fastfetch/config.jsonc"
+echo "    - kitty         → ~/.config/kitty/kitty.conf + colors.conf"
+echo "    - waybar        → ~/.config/waybar/config.json + style.css"
+echo "    - waybar scripts→ scroll_text.sh, weather.sh, wallpaper_picker.sh"
+echo "    - wofi          → ~/.config/wofi/config + style.css"
+echo "    - swaync        → ~/.config/swaync/config.json (kew notifications silenced)"
 echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
 echo "    - Screenshots pre-created at ~/Pictures/Screenshots"
+echo "    - Wallpapers directory pre-created at ~/Pictures/wallpapers"
 echo ""
 echo "  Next steps after reboot:"
-echo "    - Set a wallpaper:  swww img /path/to/wallpaper"
+echo "    - Add wallpapers to ~/Pictures/wallpapers"
+echo "    - Set initial wallpaper: swww img /path/to/wallpaper"
+echo "    - Open wallpaper picker: SUPER+Z"
 echo "    - Configure Qt theming: qt6ct"
 echo "      (If KDE apps look off, re-open qt6ct and select the qt6ct-kde variant)"
 echo "    - Test Vulkan: vkcube  |  Test VA-API: vainfo"
