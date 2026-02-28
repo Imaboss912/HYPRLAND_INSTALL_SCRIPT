@@ -83,8 +83,6 @@ fi
 
 rm -rf /tmp/cachyos-repo*
 
-# No cachyos-gaming-meta on this build — it pulls in mesa-git/jack/wine which
-# we don't need and which conflict with the standard mesa stack we DO need for nouveau.
 pacman -Syu --needed --noconfirm cachyos-settings cachyos-hooks
 
 if ! pacman -S --needed --noconfirm yay 2>/dev/null; then
@@ -102,7 +100,6 @@ fi
 # --- 5. Kernel, Microcode & Bootloader ---
 # =========================================================
 log "--- Installing CachyOS Kernel & Intel Microcode ---"
-# intel-ucode: loads CPU microcode updates at boot — important for Sandy Bridge security fixes
 pacman -S --needed --noconfirm linux-cachyos linux-cachyos-headers intel-ucode
 
 if command -v grub-mkconfig &> /dev/null; then
@@ -111,8 +108,6 @@ elif [ -d "/boot/loader/entries" ]; then
     bootctl --path=/boot update
 else
     log "WARNING: Could not detect GRUB or systemd-boot."
-    log "  systemd-boot: bootctl install"
-    log "  GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
     read -p "Press Enter to continue, then fix bootloader before rebooting..."
 fi
 
@@ -120,9 +115,6 @@ fi
 # --- 6. Graphics Stack (nouveau / Fermi) ---
 # =========================================================
 log "--- Installing Graphics Stack (nouveau) ---"
-# Quadro 1000M is Fermi (GF108M). Proprietary nvidia support ended at 390xx which
-# is EOL and difficult on Wayland. nouveau via mesa/gallium is the stable choice.
-# mesa provides OpenGL + Vulkan stub; lib32-mesa for 32-bit compat.
 pacman -S --needed --noconfirm \
     mesa lib32-mesa \
     libva-mesa-driver \
@@ -162,7 +154,8 @@ pacman -S --needed --noconfirm \
     btop fastfetch nsxiv filelight \
     gparted smartmontools transmission-qt \
     zram-generator \
-    blueman network-manager-applet
+    blueman network-manager-applet \
+    imagemagick
 
 pacman -S --needed --noconfirm ananicy-cpp || \
     log "ananicy-cpp not in repos — will install via yay in AUR section."
@@ -171,12 +164,6 @@ pacman -S --needed --noconfirm ananicy-cpp || \
 # --- 10. Laptop Power Management ---
 # =========================================================
 log "--- Installing laptop power management ---"
-# tlp: best-in-class power saving for laptops — handles CPU scaling, disk spindown,
-#      WiFi power save, USB autosuspend automatically
-# tlp-rdw: radio device wizard (enables/disables WiFi/BT on lid open/close)
-# thermald: Intel thermal daemon — prevents thermal throttling on Sandy Bridge
-# acpid: handles lid close, power button, dock events
-# powertop: useful for diagnosing power drain post-install (run manually)
 pacman -S --needed --noconfirm \
     tlp tlp-rdw \
     thermald \
@@ -221,10 +208,8 @@ log "--- Enabling system services ---"
 loginctl enable-linger "$TARGET_USER"
 sudo -u "$TARGET_USER" xdg-user-dirs-update
 
-# TLP for power saving — replaces the default systemd power profiles service
 systemctl enable tlp
 systemctl enable tlp-rdw
-# Mask these so they don't conflict with TLP
 systemctl mask systemd-rfkill.service systemctl mask systemd-rfkill.socket || true
 
 systemctl enable thermald
@@ -232,10 +217,8 @@ systemctl enable acpid
 systemctl enable bluetooth
 systemctl enable ananicy-cpp
 
-# ly runs on tty2 — disable getty@tty2 to free it up
 systemctl disable getty@tty2 || true
 
-# PipeWire at user level
 sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
 
 # --- zram ---
@@ -252,8 +235,6 @@ systemctl daemon-reload
 systemctl enable --now systemd-zram-setup@zram0.service
 
 # --- Intel power saving kernel params ---
-# Sandy Bridge supports i915 power saving features.
-# Check if already set, patch GRUB or advise for systemd-boot.
 if command -v grub-mkconfig &> /dev/null && [ -f /etc/default/grub ]; then
     NEEDS_UPDATE=0
     if ! grep -q 'i915.enable_psr=1' /etc/default/grub; then
@@ -304,8 +285,6 @@ else
 
 # =============================================================================
 # MONITORS
-# eDP-1 is the internal laptop display. Run `hyprctl monitors all` to confirm.
-# Adjust resolution/refresh to match your panel — common M4600 panel is 1920x1080.
 # =============================================================================
 
 monitor=eDP-1, 1920x1080@60, 0x0, 1
@@ -323,6 +302,8 @@ exec-once = hyprsunset -t 4500
 exec-once = swaync
 exec-once = wl-paste --watch cliphist store
 exec-once = nm-applet --indicator
+exec-once = kew
+
 
 # =============================================================================
 # ENVIRONMENT VARIABLES
@@ -336,11 +317,9 @@ env = XMODIFIERS,@im=fcitx
 env = QT_QPA_PLATFORMTHEME,qt6ct
 env = QT_QPA_PLATFORM,wayland
 
-# nouveau requires software cursors on Wayland
 env = WLR_NO_HARDWARE_CURSORS,1
-
-# Ensure nouveau is used for VA-API (limited on Fermi but available)
 env = LIBVA_DRIVER_NAME,nouveau
+
 
 # =============================================================================
 # DEFAULT PROGRAMS
@@ -373,8 +352,8 @@ input {
     sensitivity  = 0
 
     touchpad {
-        natural_scroll    = true
-        tap-to-click      = true
+        natural_scroll       = true
+        tap-to-click         = true
         disable_while_typing = true
     }
 }
@@ -384,7 +363,7 @@ cursor {
 }
 
 gestures {
-    workspace_swipe = true
+    workspace_swipe         = true
     workspace_swipe_fingers = 3
 }
 
@@ -458,6 +437,7 @@ bind = $mainMod SHIFT, SPACE, togglefloating,
 bind = $mainMod, F, fullscreen,
 bind = $mainMod, D, exec, $menu
 bind = $mainMod, V, exec, cliphist list | wofi --dmenu | cliphist decode | wl-copy
+bind = $mainMod, Z, exec, $HOME/.config/waybar/scripts/wallpaper_picker.sh
 
 # Laptop brightness keys
 bind = , XF86MonBrightnessUp,   exec, brightnessctl set +5%
@@ -646,13 +626,15 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "hyprland/workspaces"
   ],
   "modules-center": [
-    "custom/applauncher"
+    "custom/media"
   ],
   "modules-right": [
+    "custom/wallpaper",
     "network",
     "battery",
     "pulseaudio",
     "tray",
+    "custom/weather",
     "clock"
   ],
   "hyprland/workspaces": {
@@ -660,9 +642,21 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "all-outputs": false,
     "tooltip": false
   },
-  "custom/applauncher": {
-    "format": "///",
-    "on-click": "pkill -x wofi || wofi --show drun --location=top -y 10",
+  "custom/media": {
+    "format": "󰎈 {}",
+    "exec": "$HOME/.config/waybar/scripts/scroll_text.sh",
+    "on-click": "playerctl -p kew play-pause",
+    "tooltip": false
+  },
+  "custom/wallpaper": {
+    "format": "󰋩",
+    "on-click": "$HOME/.config/waybar/scripts/wallpaper_picker.sh",
+    "tooltip": false
+  },
+  "custom/weather": {
+    "format": "{}",
+    "exec": "$HOME/.config/waybar/scripts/weather.sh",
+    "interval": 900,
     "tooltip": false
   },
   "tray": {
@@ -670,28 +664,28 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "tooltip": false
   },
   "clock": {
-    "format": "󰅐 {:%H:%M}",
+    "format": "󰅐  {:%H:%M}",
     "tooltip": false
   },
   "network": {
-    "format-wifi": " {bandwidthDownBits}",
-    "format-ethernet": " {bandwidthDownBits}",
-    "format-disconnected": "󰤮 No Network",
+    "format-wifi": "  {bandwidthDownBits}",
+    "format-ethernet": "  {bandwidthDownBits}",
+    "format-disconnected": "󰤮  No Network",
     "interval": 5,
     "tooltip": false
   },
   "pulseaudio": {
     "scroll-step": 5,
     "max-volume": 150,
-    "format": "{icon} {volume}%",
-    "format-bluetooth": "{icon} {volume}%",
+    "format": "{icon}  {volume}%",
+    "format-bluetooth": "{icon}  {volume}%",
     "format-icons": [
       "",
       "",
       " "
     ],
     "nospacing": 1,
-    "format-muted": " ",
+    "format-muted": "  ",
     "on-click": "pavucontrol",
     "tooltip": false
   },
@@ -700,11 +694,11 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
       "warning": 30,
       "critical": 15
     },
-    "format": "{icon} {capacity}%",
-    "format-charging": "󰂄 {capacity}%",
-    "format-plugged": "󰂄{capacity}%",
-    "format-alt": "{icon} {time}",
-    "format-full": "󱈑 {capacity}%",
+    "format": "{icon}  {capacity}%",
+    "format-charging": "󰂄  {capacity}%",
+    "format-plugged": "󰂄  {capacity}%",
+    "format-alt": "{icon}  {time}",
+    "format-full": "󱈑  {capacity}%",
     "format-icons": [
       "󱊡",
       "󱊢",
@@ -716,26 +710,26 @@ EOF
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/style.css" > /dev/null
 * {
-  /* General taskbar font, I like maple mono ^-^*/
   font-family: Maple Mono;
-  border-radius: 8;
+  border-radius: 8px;
   font-size: 13px;
   padding: 0px;
   background: transparent;
 }
 
 window#waybar {
-  /* Linear gradients are used because it makes less harsh rounded border radius, gtk bug :p */
   background-color: rgba(20, 18, 22, 0.7);
   border-radius: 14px;
   padding: 0px;
   border-style: none;
 }
 
-#battery,
 #network,
 #clock,
-#custom-applauncher,
+#custom-media,
+#custom-weather,
+#custom-wallpaper,
+#battery,
 #tray,
 #workspaces,
 #pulseaudio {
@@ -749,10 +743,9 @@ window#waybar {
   border-color: #d8cab8;
   border-width: 1px;
   transition-duration: 120ms;
-  letter-spacing: 3px;
+  letter-spacing: 1px;
 }
 
-/*  */
 #clock {
   margin-right: 6px;
 }
@@ -768,12 +761,34 @@ window#waybar {
   transition-duration: 120ms;
 }
 
-#custom-applauncher {
+#custom-media {
   font-weight: bold;
   transition-duration: 120ms;
   padding: 0px 25px 0px 25px;
+  min-width: 280px;
+  font-family: monospace;
+  color: #ac82e9;
+  border-color: #ac82e9;
 }
-#custom-applauncher:hover {
+
+#custom-media:hover {
+  background-color: rgba(20, 18, 22, 0.7);
+  color: #ac82e9;
+  transition-duration: 120ms;
+}
+
+#custom-wallpaper {
+  transition-duration: 120ms;
+  padding: 0px 8px;
+}
+
+#custom-wallpaper:hover {
+  background-color: rgba(20, 18, 22, 0.7);
+  color: #ac82e9;
+  transition-duration: 120ms;
+}
+
+#custom-weather:hover {
   background-color: rgba(20, 18, 22, 0.7);
   color: #d8cab8;
   transition-duration: 120ms;
@@ -784,16 +799,18 @@ window#waybar {
   color: #d8cab8;
   padding: 4px;
 }
+
 #tray menu menuitem {
-  background-image: linear-gradient(to bottom, #27232b 100%);
+  background-color: #27232b;
   margin: 3px;
   color: #d8cab8;
   border-radius: 4px;
   border-style: solid;
   border-color: #27232b;
 }
+
 #tray menu menuitem:hover {
-  background-image: linear-gradient(to bottom, #27232b 100%);
+  background-color: #27232b;
   color: #ac82e9;
   font-weight: bold;
 }
@@ -812,14 +829,17 @@ window#waybar {
   transition-duration: 120ms;
   color: #8f56e1;
 }
+
 #workspaces button.focused {
   color: #ac82e9;
   font-weight: bold;
 }
+
 #workspaces button.active {
   color: #ac82e9;
   font-weight: bold;
 }
+
 #workspaces button.urgent {
   color: #fcb167;
 }
@@ -828,9 +848,11 @@ window#waybar {
   background-color: rgba(20, 18, 22, 0.2);
   color: #d8cab8;
 }
+
 #battery.warning {
   color: #fcb167;
 }
+
 #battery.critical,
 #battery.urgent {
   color: #fc4649;
@@ -838,6 +860,132 @@ window#waybar {
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WAYBAR_DIR"
 log "waybar config written."
+
+# ---- Waybar Scripts ----
+log "--- Writing waybar scripts ---"
+SCRIPTS_DIR="$USER_HOME/.config/waybar/scripts"
+sudo -u "$TARGET_USER" mkdir -p "$SCRIPTS_DIR"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/scroll_text.sh" > /dev/null
+#!/bin/bash
+
+PLAYER="kew"
+MAX_LEN=30
+SCROLL_DELAY=0.3
+
+get_text() {
+    playerctl -p "$PLAYER" metadata --format '{{artist}} – {{title}}' 2>/dev/null
+}
+
+text=""
+padded=""
+padded_len=0
+offset=0
+tick=0
+
+while true; do
+    status=$(playerctl -p "$PLAYER" status 2>/dev/null)
+
+    if [ "$status" != "Playing" ] && [ "$status" != "Paused" ]; then
+        echo ""
+        sleep 2
+        continue
+    fi
+
+    if [ $((tick % 10)) -eq 0 ]; then
+        current_text=$(get_text)
+        if [ "$current_text" != "$text" ]; then
+            text="$current_text"
+            padded="$text     "
+            padded_len=${#padded}
+            offset=0
+        fi
+    fi
+
+    chunk="${padded:$offset:$MAX_LEN}"
+    while [ ${#chunk} -lt $MAX_LEN ]; do
+        chunk="$chunk${padded:0:$((MAX_LEN - ${#chunk}))}"
+    done
+
+    if [ "$status" = "Paused" ]; then
+        echo "⏸ $chunk"
+    else
+        echo "$chunk"
+    fi
+
+    offset=$(( (offset + 1) % padded_len ))
+    tick=$((tick + 1))
+    sleep "$SCROLL_DELAY"
+done
+EOF
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/weather.sh" > /dev/null
+#!/bin/bash
+
+LAT="33.9806"
+LON="-117.3755"
+
+for i in $(seq 1 10); do
+    data=$(curl -sf --max-time 5 "https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON&current_weather=true&temperature_unit=fahrenheit" 2>/dev/null)
+    [ -n "$data" ] && break
+    sleep 3
+done
+
+if [ -z "$data" ]; then
+    echo "N/A"
+    exit 0
+fi
+
+temp=$(echo "$data" | grep -o '"temperature":[0-9.]*' | tail -1 | cut -d: -f2)
+code=$(echo "$data" | grep -o '"weathercode":[0-9]*' | tail -1 | cut -d: -f2)
+
+case $code in
+    0) condition="Clear"   icon="󰖙" ;;
+    1|2|3) condition="Cloudy"  icon="󰖕" ;;
+    45|48) condition="Foggy"   icon="󰖑" ;;
+    51|53|55|61|63|65) condition="Rainy"   icon="󰖗" ;;
+    71|73|75) condition="Snowy"   icon="󰼶" ;;
+    80|81|82) condition="Showers" icon="󰖖" ;;
+    95|96|99) condition="Stormy"  icon="󰖓" ;;
+    *) condition="Unknown" icon="󰖔" ;;
+esac
+
+echo "$icon  ${temp}°F $condition"
+EOF
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/wallpaper_picker.sh" > /dev/null
+#!/bin/bash
+
+WALLPAPER_DIR="$HOME/Pictures/wallpapers"
+CACHE_DIR="$HOME/.cache/wallpaper_thumbs"
+LIST_CACHE="$CACHE_DIR/wofi_list.txt"
+
+mkdir -p "$CACHE_DIR"
+
+if [ ! -f "$LIST_CACHE" ] || [ "$WALLPAPER_DIR" -nt "$LIST_CACHE" ]; then
+    > "$LIST_CACHE"
+    find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" \) | while read -r img; do
+        thumb="$CACHE_DIR/$(basename "$img").thumb.png"
+        if [ ! -f "$thumb" ]; then
+            magick "$img"[0] -thumbnail 200x200^ -gravity center -extent 200x200 "$thumb" 2>/dev/null
+        fi
+        echo "img:$thumb:text:$img"
+    done > "$LIST_CACHE"
+fi
+
+selected=$(cat "$LIST_CACHE" | wofi --dmenu --allow-images --prompt "Wallpaper" --location=center)
+
+if [ -n "$selected" ]; then
+    full_path=$(echo "$selected" | sed 's/.*text://')
+    swww img "$full_path" --transition-type wipe --transition-duration 1 --transition-fps 60
+fi
+EOF
+
+chmod +x "$SCRIPTS_DIR/scroll_text.sh"
+chmod +x "$SCRIPTS_DIR/weather.sh"
+chmod +x "$SCRIPTS_DIR/wallpaper_picker.sh"
+chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
+log "waybar scripts written."
 
 # ---- Wofi ----
 log "--- Writing wofi config ---"
@@ -896,6 +1044,7 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/style.css" > /dev/null
   margin-right: 12px;
   border-radius: 8px;
 }
+
 #entry:selected {
   background-color: rgba(0, 0, 0, 0.2);
   border-style: none;
@@ -918,6 +1067,7 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/style.css" > /dev/null
   padding: 12px;
   margin: 8px;
 }
+
 #input:focus {
   background-color: rgba(0, 0, 0, 0.2);
   border-color: #ac82e9;
@@ -932,6 +1082,24 @@ EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$WOFI_DIR"
 log "wofi config written."
 
+# ---- Swaync ----
+log "--- Writing swaync config ---"
+SWAYNC_DIR="$USER_HOME/.config/swaync"
+sudo -u "$TARGET_USER" mkdir -p "$SWAYNC_DIR"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SWAYNC_DIR/config.json" > /dev/null
+{
+  "notification-visibility": {
+    "kew": {
+      "state": "ignored",
+      "app-name": "kew"
+    }
+  }
+}
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$SWAYNC_DIR"
+log "swaync config written."
+
 # ---- Fastfetch on terminal open ----
 BASHRC="$USER_HOME/.bashrc"
 sudo -u "$TARGET_USER" touch "$BASHRC"
@@ -944,8 +1112,9 @@ EOF
     log ".bashrc updated — fastfetch will run on every new terminal."
 fi
 
-# ---- Screenshots directory ----
+# ---- Screenshots & Wallpapers directories ----
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/Screenshots"
+sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/wallpapers"
 
 # =========================================================
 # --- 16. Enable Login Manager ---
@@ -965,25 +1134,31 @@ echo "  Intel microcode (intel-ucode) installed."
 echo "  nouveau graphics stack via mesa/gallium."
 echo "  TLP power management enabled."
 echo "  PipeWire user services enabled."
-echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist in exec-once."
+echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist, kew in exec-once."
 echo ""
 echo "  App configs written:"
-echo "    - fastfetch  → ~/.config/fastfetch/config.jsonc (includes battery)"
-echo "    - kitty      → ~/.config/kitty/kitty.conf + colors.conf"
-echo "    - waybar     → ~/.config/waybar/config.json + style.css"
-echo "    - wofi       → ~/.config/wofi/config + style.css"
+echo "    - fastfetch   → ~/.config/fastfetch/config.jsonc (includes battery)"
+echo "    - kitty       → ~/.config/kitty/kitty.conf + colors.conf"
+echo "    - waybar      → ~/.config/waybar/config.json + style.css"
+echo "    - waybar scripts → scroll_text.sh, weather.sh, wallpaper_picker.sh"
+echo "    - wofi        → ~/.config/wofi/config + style.css"
+echo "    - swaync      → ~/.config/swaync/config.json (kew notifications silenced)"
 echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
 echo "    - Screenshots pre-created at ~/Pictures/Screenshots"
+echo "    - Wallpapers directory pre-created at ~/Pictures/wallpapers"
 echo ""
 echo "  Next steps after reboot:"
-echo "    - Set a wallpaper:  swww img /path/to/wallpaper"
+echo "    - Add wallpapers to ~/Pictures/wallpapers"
+echo "    - Set initial wallpaper: swww img /path/to/wallpaper"
+echo "    - Open wallpaper picker: SUPER+Z"
 echo "    - Configure Qt theming: qt6ct"
 echo "    - Check battery status: cat /sys/class/power_supply/BAT0/status"
 echo "    - Monitor power usage: sudo powertop"
 echo "    - Check TLP status: sudo tlp-stat -s"
-echo "    - If display is wrong resolution, run: hyprctl monitors all"
+echo "    - If display is wrong resolution: hyprctl monitors all"
 echo "      then adjust eDP-1 line in ~/.config/hypr/hyprland.conf"
 echo "    - Brightness keys (Fn+F4/F5) and volume keys work out of the box"
+echo "    - Music controls: SUPER+ALT+P/Left/Right via kew+playerctl"
 echo "    - Log in via ly and enjoy Hyprland"
 echo "============================================="
 echo ""
