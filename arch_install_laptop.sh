@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Arch + Hyprland (2026 Edition)
+# Arch + i3 + nvidia-390xx (2026 Edition)
 # Optimized for: Dell Precision M4600 (Intel Sandy Bridge + Quadro 1000M)
-# GPU driver: nouveau (Fermi — proprietary nvidia dropped support after 390xx)
-# Note: CachyOS repos require x86_64_v3 (AVX2) — Sandy Bridge is v2 only.
-#       Using standard Arch repos with linux-lts kernel instead.
+# GPU driver: nvidia-390xx-dkms (last driver supporting Fermi)
 # ---------------------------------------------------------
 set -euo pipefail
 
@@ -15,7 +13,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-if ! ping -c 1 google.com &> /dev/null; then
+if ! ping -c 1 1.1.1.1 &> /dev/null; then
     echo "No internet connection detected. Please fix and try again."
     exit 1
 fi
@@ -30,7 +28,7 @@ log() {
     echo "$msg" >> "$LOGFILE"
 }
 
-log "=== System Setup for $TARGET_USER (CPU: Sandy Bridge | GPU: Quadro 1000M/nouveau) ==="
+log "=== i3 Setup for $TARGET_USER (CPU: Sandy Bridge | GPU: Quadro 1000M/nvidia-390xx) ==="
 
 # =========================================================
 # --- 1. Collect All Prompts Upfront ---
@@ -61,8 +59,13 @@ reflector --country "$MIRROR_COUNTRY" --protocol https --latest 15 --sort rate -
 # =========================================================
 log "--- Enabling Multilib repository & parallel downloads ---"
 sed -i '/\[multilib\]/,/Include/s/^[ ]*#//' /etc/pacman.conf
-grep -q '^ParallelDownloads' /etc/pacman.conf || \
+if grep -q '^ParallelDownloads' /etc/pacman.conf; then
+    : # already set, nothing to do
+elif grep -q '^#ParallelDownloads' /etc/pacman.conf; then
     sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 10/' /etc/pacman.conf
+else
+    echo 'ParallelDownloads = 10' >> /etc/pacman.conf
+fi
 pacman -Syy --noconfirm
 
 # =========================================================
@@ -70,13 +73,11 @@ pacman -Syy --noconfirm
 # =========================================================
 log "--- Installing yay ---"
 if ! command -v yay &> /dev/null; then
-    (
-        BUILDDIR=$(sudo -u "$TARGET_USER" mktemp -d)
-        sudo -u "$TARGET_USER" git clone https://aur.archlinux.org/yay.git "$BUILDDIR/yay"
-        cd "$BUILDDIR/yay"
-        sudo -u "$TARGET_USER" makepkg -si --noconfirm
-        rm -rf "$BUILDDIR"
-    )
+    BUILDDIR="/tmp/yay_build_$$"
+    sudo -u "$TARGET_USER" mkdir -p "$BUILDDIR"
+    sudo -u "$TARGET_USER" git clone https://aur.archlinux.org/yay.git "$BUILDDIR/yay"
+    ( cd "$BUILDDIR/yay" && sudo -u "$TARGET_USER" makepkg -si --noconfirm )
+    rm -rf "$BUILDDIR"
 else
     log "yay already installed — skipping."
 fi
@@ -85,31 +86,64 @@ fi
 # --- 5. Kernel, Microcode & Bootloader ---
 # =========================================================
 log "--- Installing linux-lts kernel & Intel Microcode ---"
-# linux-lts: more stable than mainline, better suited for older hardware.
-# intel-ucode: loads CPU microcode updates at boot — important for Sandy Bridge security fixes.
-pacman -S --needed --noconfirm linux-lts linux-lts-headers intel-ucode
+pacman -S --needed --noconfirm linux-lts linux-lts-headers intel-ucode dkms
+
+# =========================================================
+# --- 6. nvidia-390xx Driver ---
+# =========================================================
+log "--- Installing legacy NVIDIA 390xx driver (Fermi/Quadro 1000M only viable accel option) ---"
+
+# Blacklist nouveau aggressively
+cat <<'EOF' > /etc/modprobe.d/blacklist-nouveau.conf
+blacklist nouveau
+options nouveau modeset=0
+EOF
+
+# Install from AUR — expect possible build issues after kernel updates
+log "Installing nvidia-390xx packages via yay (may require manual patching if build fails)..."
+log "  NOTE: DKMS compile on Sandy Bridge takes 20-30+ minutes — go grab a coffee!"
+sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
+    nvidia-390xx-dkms \
+    nvidia-390xx-utils \
+    lib32-nvidia-390xx-utils || {
+    log "ERROR: nvidia-390xx AUR install failed."
+    log "  -> Check AUR comments for patches: https://aur.archlinux.org/packages/nvidia-390xx-dkms"
+    log "  -> Common fix: apply community patches for kernel/gcc version mismatch."
+    log "  -> Fallback: sudo rm /etc/modprobe.d/blacklist-nouveau.conf && mkinitcpio -P && reboot"
+    log "  -> Continuing script -- fix driver manually after reboot."
+}
+
+# DO NOT add nvidia modules to mkinitcpio MODULES array.
+# Early loading causes black screen on many Fermi laptops (GF108/GF116 family).
+# The driver loads fine via modprobe after boot without early preload.
+
+# Regenerate initramfs (without nvidia preload -- intentional)
+mkinitcpio -P
+log "initramfs regenerated (nvidia modules NOT preloaded -- intentional for Fermi stability)."
+
+# Add nvidia-drm.modeset=1 to GRUB and remove i915 params (idempotent)
+if ! grep -q 'nvidia-drm.modeset=1' /etc/default/grub; then
+    sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 nvidia-drm.modeset=1"/' /etc/default/grub
+fi
+sed -i 's/ i915\.enable_psr=[01]//g' /etc/default/grub
+sed -i 's/ i915\.enable_fbc=[01]//g' /etc/default/grub
 
 if command -v grub-mkconfig &> /dev/null; then
     grub-mkconfig -o /boot/grub/grub.cfg
 elif [ -d "/boot/loader/entries" ]; then
     bootctl --path=/boot update
-else
-    log "WARNING: Could not detect GRUB or systemd-boot."
-    log "  systemd-boot: bootctl install"
-    log "  GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
-    read -p "Press Enter to continue, then fix bootloader before rebooting..."
 fi
+log "GRUB updated with nvidia-drm.modeset=1."
 
-# =========================================================
-# --- 6. Graphics Stack (nouveau / Fermi) ---
-# =========================================================
-log "--- Installing Graphics Stack (nouveau) ---"
-# Quadro 1000M is Fermi (GF108M). Proprietary nvidia support ended at 390xx which
-# is EOL and difficult on Wayland. nouveau via mesa/gallium is the stable choice.
-pacman -S --needed --noconfirm \
-    mesa lib32-mesa \
-    libva-mesa-driver \
-    ffmpeg
+# Quick smoke test (non-fatal -- driver may not be active until reboot)
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+    log "SUCCESS: nvidia-smi reports driver loaded."
+else
+    log "NOTE: nvidia-smi not yet active -- expected before reboot."
+    log "  -> If black screen after reboot: add 'nomodeset' to GRUB line temporarily."
+    log "  -> Check /var/log/Xorg.0.log for errors."
+    log "  -> Nouveau fallback: sudo rm /etc/modprobe.d/blacklist-nouveau.conf && mkinitcpio -P && reboot"
+fi
 
 # =========================================================
 # --- 7. Audio Stack (PipeWire) ---
@@ -120,32 +154,40 @@ pacman -S --needed --noconfirm \
     wireplumber pavucontrol pamixer playerctl
 
 # =========================================================
-# --- 8. Qt / Wayland Integration ---
+# --- 8. X11 ---
 # =========================================================
-log "--- Installing Qt Wayland support ---"
-pacman -S --needed --noconfirm qt5-wayland qt6-wayland
+log "--- Installing X11 ---"
+pacman -S --needed --noconfirm \
+    xorg-server xorg-xinit xorg-xrandr xorg-xset xorg-xinput \
+    xdg-user-dirs xdg-desktop-portal xdg-desktop-portal-gtk \
+    qt5-x11extras qt6-base
 
 # =========================================================
 # --- 9. Desktop Stack ---
 # =========================================================
-log "--- Installing Hyprland & Desktop Environment ---"
+log "--- Installing i3 & Desktop Environment ---"
 pacman -S --needed --noconfirm \
-    hyprland waybar wofi swww \
-    hyprsunset hyprlock hypridle hyprcursor \
-    xorg-xwayland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk \
-    xdg-user-dirs \
+    i3-wm i3lock \
+    polybar \
+    rofi \
+    picom \
+    feh \
+    dunst \
+    xautolock \
+    redshift \
+    maim xdotool xclip \
     kitty \
     noto-fonts noto-fonts-cjk ttf-jetbrains-mono-nerd \
     ttf-dejavu ttf-roboto ttf-font-awesome \
-    wl-clipboard cliphist swaync \
-    pcmanfm-qt gvfs gvfs-mtp gvfs-smb \
+    pcmanfm-qt gvfs gvfs-mtp gvfs-smb gvfs-afc \
     brightnessctl \
     fcitx5 fcitx5-mozc fcitx5-configtool \
     firefox mpv \
     btop fastfetch nsxiv filelight \
     gparted smartmontools transmission-qt \
     zram-generator \
-    blueman network-manager-applet \
+    networkmanager blueman network-manager-applet \
+    bluez bluez-utils \
     imagemagick \
     flatpak
 
@@ -154,7 +196,7 @@ pacman -S --needed --noconfirm \
 # =========================================================
 log "--- Installing laptop power management ---"
 pacman -S --needed --noconfirm \
-    tlp tlp-rdw \
+    tlp \
     thermald \
     acpid \
     powertop
@@ -164,44 +206,32 @@ pacman -S --needed --noconfirm \
 # =========================================================
 log "--- Installing Productivity Applications ---"
 pacman -S --needed --noconfirm \
-    libreoffice-fresh okular krita anki
+    libreoffice-fresh okular krita anki code
 
 # =========================================================
 # --- 12. AUR Packages ---
 # =========================================================
 log "--- Installing AUR packages (running as $TARGET_USER) ---"
 sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
-    hyprshot \
-    hyprpolkit \
     bitwarden \
     qt6ct-kde \
     ttf-maple \
-    kew-git
+    kew-git \
+    greenclip
 
-# Stremio via Flatpak — avoids compiling qt5-webengine which fails on low-RAM machines
+# Stremio via Flatpak
 log "--- Installing Flatpak apps ---"
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install -y flathub com.stremio.Stremio
-
-if command -v hyprpolkit-agent &> /dev/null; then
-    HYPRPOLKIT_BIN="hyprpolkit-agent"
-elif command -v hyprpolkit &> /dev/null; then
-    HYPRPOLKIT_BIN="hyprpolkit"
-else
-    log "WARNING: hyprpolkit binary not found — defaulting to 'hyprpolkit'."
-    HYPRPOLKIT_BIN="hyprpolkit"
-fi
-log "Detected hyprpolkit binary: $HYPRPOLKIT_BIN"
 
 # =========================================================
 # --- 13. System Services ---
 # =========================================================
 log "--- Enabling system services ---"
 loginctl enable-linger "$TARGET_USER"
-sudo -u "$TARGET_USER" xdg-user-dirs-update
 
-# TLP for power saving — mask rfkill services so they don't conflict
 systemctl enable tlp
+systemctl enable NetworkManager
 systemctl mask systemd-rfkill.service || true
 systemctl mask systemd-rfkill.socket || true
 
@@ -209,11 +239,10 @@ systemctl enable thermald
 systemctl enable acpid
 systemctl enable bluetooth
 
-# ly runs on tty2 — disable getty@tty2 to free it up
 systemctl disable getty@tty2 || true
 
-# PipeWire at user level
 sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber || true
+sudo -u "$TARGET_USER" xdg-user-dirs-update || true
 
 # --- zram ---
 if [ ! -f /etc/systemd/zram-generator.conf ]; then
@@ -228,644 +257,557 @@ fi
 systemctl daemon-reload
 systemctl enable --now systemd-zram-setup@zram0.service
 
-# --- Intel power saving kernel params ---
-# Sandy Bridge supports i915 power saving features.
-if command -v grub-mkconfig &> /dev/null && [ -f /etc/default/grub ]; then
-    NEEDS_UPDATE=0
-    if ! grep -q 'i915.enable_psr=1' /etc/default/grub; then
-        sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 i915.enable_psr=1"/' /etc/default/grub
-        NEEDS_UPDATE=1
-    fi
-    if ! grep -q 'i915.enable_fbc=1' /etc/default/grub; then
-        sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 i915.enable_fbc=1"/' /etc/default/grub
-        NEEDS_UPDATE=1
-    fi
-    if [ "$NEEDS_UPDATE" -eq 1 ]; then
-        grub-mkconfig -o /boot/grub/grub.cfg
-        log "i915 power saving params added to GRUB (PSR + FBC)."
-    fi
-elif [ -d "/boot/loader/entries" ]; then
-    log "NOTE (systemd-boot): Manually add 'i915.enable_psr=1 i915.enable_fbc=1' to"
-    log "  your kernel options in /boot/loader/entries/<your-entry>.conf"
-fi
-
 # --- ly display manager config ---
 LY_CONF="/etc/ly/config.ini"
 if [ -f "$LY_CONF" ]; then
     sed -i 's/^#\?\s*save_last_session\s*=.*/save_last_session = true/' "$LY_CONF"
-    grep -q '^waylandsessions' "$LY_CONF" || \
-        echo "waylandsessions = /usr/share/wayland-sessions" >> "$LY_CONF"
-    log "ly config patched (save_last_session + waylandsessions)."
+    grep -q '^xsessions' "$LY_CONF" || \
+        echo "xsessions = /usr/share/xsessions" >> "$LY_CONF"
+    log "ly config patched for X11 sessions."
 else
     log "WARNING: /etc/ly/config.ini not found — patch manually after install."
 fi
 
 # =========================================================
-# --- 14. Hyprland Config ---
+# --- 14. i3 Config ---
 # =========================================================
-log "--- Writing Hyprland config ---"
-HYPR_CONF="$USER_HOME/.config/hypr/hyprland.conf"
-sudo -u "$TARGET_USER" mkdir -p "$(dirname "$HYPR_CONF")"
+log "--- Writing i3 config ---"
+I3_DIR="$USER_HOME/.config/i3"
+sudo -u "$TARGET_USER" mkdir -p "$I3_DIR"
 
-if grep -q "Auto-Injected" "$HYPR_CONF" 2>/dev/null; then
-    log "Hyprland config already written — skipping to avoid overwrite."
-else
-    cat <<'EOF' | sudo -u "$TARGET_USER" tee "$HYPR_CONF" > /dev/null
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$I3_DIR/config" > /dev/null
 # =============================================================================
-# hyprland.conf — Auto-generated by arch_install_laptop.sh (2026)
-# Dell Precision M4600 — Intel Sandy Bridge + Quadro 1000M (nouveau)
-# =============================================================================
-# Auto-Injected — marker used by install script to detect re-runs
-
-
-# =============================================================================
-# MONITORS
-# eDP-1 is the internal laptop display. Run `hyprctl monitors all` to confirm.
+# i3 config — Auto-generated by arch_install_laptop_i3.sh (2026)
+# Dell Precision M4600 — Intel Sandy Bridge + Quadro 1000M (nvidia-390xx)
 # =============================================================================
 
-monitor=eDP-1, 1920x1080@60, 0x0, 1
+set $mod Mod4
 
+font pango:Maple Mono 11
 
-# =============================================================================
-# STARTUP (exec-once)
-# =============================================================================
+# =========================================================
+# STARTUP
+# =========================================================
 
-exec-once = waybar
-exec-once = swww-daemon
-exec-once = fcitx5 -d
-exec-once = HYPRPOLKIT_PLACEHOLDER
-exec-once = hyprsunset -t 4500
-exec-once = swaync
-exec-once = wl-paste --watch cliphist store
-exec-once = nm-applet --indicator
-exec-once = kew
+exec_always --no-startup-id $HOME/.config/polybar/launch.sh
+exec_always --no-startup-id sh -c 'pkill picom 2>/dev/null || true; picom'
+exec_always --no-startup-id sh -c 'feh --bg-fill ~/.config/i3/wallpaper 2>/dev/null || true'
+exec --no-startup-id fcitx5 -d
+exec --no-startup-id dunst
+exec --no-startup-id nm-applet
+exec --no-startup-id redshift
+exec --no-startup-id xautolock -time 10 -locker i3lock
+exec --no-startup-id greenclip daemon
+exec --no-startup-id kew
+exec --no-startup-id xset r rate 300 50
 
+# =========================================================
+# APPEARANCE
+# =========================================================
 
-# =============================================================================
-# ENVIRONMENT VARIABLES
-# =============================================================================
+client.focused               #d8cab8   #141216   #d8cab8   #ac82e9   #d8cab8
+client.unfocused             #ac82e9   #141216   #ac82e9   #ac82e9   #ac82e9
+client.focused_inactive      #ac82e9   #141216   #ac82e9   #ac82e9   #ac82e9
+client.urgent                #fcb167   #141216   #fcb167   #fcb167   #fcb167
 
-env = XCURSOR_SIZE,24
-env = HYPRCURSOR_SIZE,24
+default_border pixel 1
+default_floating_border pixel 1
+gaps inner 5
+gaps outer 8
+smart_gaps on
 
-env = XMODIFIERS,@im=fcitx
-
-env = QT_QPA_PLATFORMTHEME,qt6ct
-env = QT_QPA_PLATFORM,wayland
-
-# nouveau requires software cursors on Wayland
-env = WLR_NO_HARDWARE_CURSORS,1
-
-# Ensure nouveau is used for VA-API (limited on Fermi but available)
-env = LIBVA_DRIVER_NAME,nouveau
-
-
-# =============================================================================
-# DEFAULT PROGRAMS
-# =============================================================================
-
-$terminal    = kitty
-$fileManager = pcmanfm-qt
-$menu        = pgrep wofi > /dev/null 2>&1 && killall wofi || wofi --show drun
-
-
-# =============================================================================
-# WORKSPACES
-# =============================================================================
-
-workspace = 1, monitor:eDP-1, default:true
-
-
-# =============================================================================
-# INPUT
-# =============================================================================
-
-input {
-    kb_layout  = us
-    kb_options = grp:alt_shift_toggle
-    kb_rules   =
-    kb_variant =
-    kb_model   =
-
-    follow_mouse = 1
-    sensitivity  = 0
-
-    touchpad {
-        natural_scroll       = true
-        tap-to-click         = true
-        disable_while_typing = true
-    }
-}
-
-cursor {
-    no_hardware_cursors = true
-}
-
-gestures {
-    workspace_swipe         = true
-    workspace_swipe_fingers = 3
-}
-
-
-# =============================================================================
-# DESIGN
-# =============================================================================
-
-animations {
-    enabled = false
-}
-
-general {
-    gaps_in  = 5
-    gaps_out = 8
-
-    border_size = 1
-
-    col.active_border   = rgb(d8cab8)
-    col.inactive_border = rgb(AC82E9)
-
-    resize_on_border = true
-    layout           = dwindle
-    allow_tearing    = false
-}
-
-decoration {
-    rounding = 6
-
-    active_opacity   = 1.0
-    inactive_opacity = 1.0
-
-    shadow:enabled      = true
-    shadow:range        = 16
-    shadow:render_power = 5
-    shadow:color        = rgba(0,0,0,0.2)
-
-    blur:enabled           = true
-    blur:new_optimizations = true
-    blur:size              = 2
-    blur:passes            = 3
-    blur:vibrancy          = 0.1696
-}
-
-dwindle {
-    pseudotile     = true
-    preserve_split = true
-}
-
-master {
-    new_status = master
-}
-
-misc {
-    force_default_wallpaper = 0
-    disable_hyprland_logo   = true
-}
-
-
-# =============================================================================
+# =========================================================
 # KEYBINDS
-# =============================================================================
+# =========================================================
 
-$mainMod = SUPER
+bindsym $mod+Return exec kitty
+bindsym $mod+q kill
+bindsym $mod+d exec rofi -show drun
+bindsym $mod+e exec pcmanfm-qt
+bindsym $mod+v exec rofi -modi "clipboard:greenclip print" -show clipboard
+bindsym $mod+Shift+s exec maim -s ~/Pictures/Screenshots/$(date +%Y-%m-%d_%H-%M-%S).png
+bindsym $mod+z exec $HOME/.config/polybar/scripts/wallpaper_picker.sh
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+f fullscreen toggle
+bindsym $mod+Shift+r reload
+bindsym $mod+ctrl+l exec i3lock
 
-bind = $mainMod, Return, exec, $terminal
-bind = $mainMod, Q, killactive,
-bind = $mainMod SHIFT, S, exec, hyprshot --mode region --output-folder ~/Pictures/Screenshots
-bind = $mainMod, E, exec, $fileManager
-bind = $mainMod SHIFT, SPACE, togglefloating,
-bind = $mainMod, F, fullscreen,
-bind = $mainMod, D, exec, $menu
-bind = $mainMod, V, exec, cliphist list | wofi --dmenu | cliphist decode | wl-copy
-bind = $mainMod, Z, exec, $HOME/.config/waybar/scripts/wallpaper_picker.sh
+# Laptop brightness
+bindsym XF86MonBrightnessUp   exec brightnessctl set +5%
+bindsym XF86MonBrightnessDown exec brightnessctl set 5%-
 
-# Laptop brightness keys
-bind = , XF86MonBrightnessUp,   exec, brightnessctl set +5%
-bind = , XF86MonBrightnessDown, exec, brightnessctl set 5%-
+# Laptop volume
+bindsym XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ +5%
+bindsym XF86AudioLowerVolume exec pactl set-sink-volume @DEFAULT_SINK@ -5%
+bindsym XF86AudioMute        exec pactl set-sink-mute @DEFAULT_SINK@ toggle
 
-# Laptop volume keys
-bind = , XF86AudioRaiseVolume,  exec, pactl set-sink-volume @DEFAULT_SINK@ +5%
-bind = , XF86AudioLowerVolume,  exec, pactl set-sink-volume @DEFAULT_SINK@ -5%
-bind = , XF86AudioMute,         exec, pactl set-sink-mute @DEFAULT_SINK@ toggle
+# Music controls
+bindsym $mod+mod1+p     exec playerctl --player=kew play-pause
+bindsym $mod+mod1+Right exec playerctl --player=kew next
+bindsym $mod+mod1+Left  exec playerctl --player=kew previous
+bindsym $mod+mod1+Up    exec pactl set-sink-volume @DEFAULT_SINK@ +5%
+bindsym $mod+mod1+Down  exec pactl set-sink-volume @DEFAULT_SINK@ -5%
 
-# Music Controls (kew + playerctl)
-bind = SUPER ALT, P,     exec, playerctl --player=kew play-pause
-bind = SUPER ALT, right, exec, playerctl --player=kew next
-bind = SUPER ALT, left,  exec, playerctl --player=kew previous
+# Focus
+bindsym $mod+h focus left
+bindsym $mod+l focus right
+bindsym $mod+k focus up
+bindsym $mod+j focus down
 
-# Workspace Switching
-bind = $mainMod, 1, workspace, 1
-bind = $mainMod, 2, workspace, 2
-bind = $mainMod, 3, workspace, 3
-bind = $mainMod, 4, workspace, 4
-bind = $mainMod, 5, workspace, 5
-bind = $mainMod, 6, workspace, 6
-bind = $mainMod, 7, workspace, 7
-bind = $mainMod, 8, workspace, 8
-bind = $mainMod, 9, workspace, 9
-bind = $mainMod, 0, workspace, 10
+# Move window
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+l move right
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+j move down
 
-# Move Window to Workspace
-bind = $mainMod SHIFT, 1, movetoworkspace, 1
-bind = $mainMod SHIFT, 2, movetoworkspace, 2
-bind = $mainMod SHIFT, 3, movetoworkspace, 3
-bind = $mainMod SHIFT, 4, movetoworkspace, 4
-bind = $mainMod SHIFT, 5, movetoworkspace, 5
-bind = $mainMod SHIFT, 6, movetoworkspace, 6
-bind = $mainMod SHIFT, 7, movetoworkspace, 7
-bind = $mainMod SHIFT, 8, movetoworkspace, 8
-bind = $mainMod SHIFT, 9, movetoworkspace, 9
-bind = $mainMod SHIFT, 0, movetoworkspace, 10
+# Split
+bindsym $mod+b split h
+bindsym $mod+n split v
 
-# Move / Resize with Mouse
-bindm = $mainMod, mouse:272, movewindow
-bindm = $mainMod, mouse:273, resizewindow
+# Layout
+bindsym $mod+s layout stacking
+bindsym $mod+w layout tabbed
+bindsym $mod+t layout toggle split
 
+# Resize mode
+mode "resize" {
+    bindsym h resize shrink width  10 px or 10 ppt
+    bindsym l resize grow   width  10 px or 10 ppt
+    bindsym k resize shrink height 10 px or 10 ppt
+    bindsym j resize grow   height 10 px or 10 ppt
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+}
+bindsym $mod+r mode "resize"
 
-# =============================================================================
-# WINDOW RULES
-# =============================================================================
+# Workspaces
+bindsym $mod+1 workspace number 1
+bindsym $mod+2 workspace number 2
+bindsym $mod+3 workspace number 3
+bindsym $mod+4 workspace number 4
+bindsym $mod+5 workspace number 5
+bindsym $mod+6 workspace number 6
+bindsym $mod+7 workspace number 7
+bindsym $mod+8 workspace number 8
+bindsym $mod+9 workspace number 9
+bindsym $mod+0 workspace number 10
 
-layerrule = blur on,          match:namespace waybar
-layerrule = blur_popups on,   match:namespace waybar
-layerrule = ignore_alpha 0.7, match:namespace waybar
+bindsym $mod+Shift+1 move container to workspace number 1
+bindsym $mod+Shift+2 move container to workspace number 2
+bindsym $mod+Shift+3 move container to workspace number 3
+bindsym $mod+Shift+4 move container to workspace number 4
+bindsym $mod+Shift+5 move container to workspace number 5
+bindsym $mod+Shift+6 move container to workspace number 6
+bindsym $mod+Shift+7 move container to workspace number 7
+bindsym $mod+Shift+8 move container to workspace number 8
+bindsym $mod+Shift+9 move container to workspace number 9
+bindsym $mod+Shift+0 move container to workspace number 10
 
-layerrule = blur on,          match:namespace wofi
-layerrule = blur_popups on,   match:namespace wofi
-layerrule = ignore_alpha 0.7, match:namespace wofi
-
-windowrule = no_focus on, match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0
+floating_modifier $mod
+bindsym $mod+Shift+q exec i3-msg exit
 EOF
-
-    sed -i "s/HYPRPOLKIT_PLACEHOLDER/$HYPRPOLKIT_BIN/" "$HYPR_CONF"
-    chown "$TARGET_USER:$TARGET_USER" "$HYPR_CONF"
-    log "hyprland.conf written (hyprpolkit binary: $HYPRPOLKIT_BIN)."
-fi
+chown -R "$TARGET_USER:$TARGET_USER" "$I3_DIR"
+log "i3 config written."
 
 # =========================================================
 # --- 15. App Configs ---
 # =========================================================
 
-# ---- Fastfetch ----
-log "--- Writing fastfetch config ---"
-FASTFETCH_CONF="$USER_HOME/.config/fastfetch/config.jsonc"
-sudo -u "$TARGET_USER" mkdir -p "$(dirname "$FASTFETCH_CONF")"
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$FASTFETCH_CONF" > /dev/null
-{
-    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
-    "logo": {
-        "source": "arch_small",
-        "padding": {
-            "top": 1,
-            "left": 2
-        }
-    },
-    "display": {
-        "separator": "  "
-    },
-    "modules": [
-        "break",
-        "title",
-        { "type": "os",       "key": "os"     },
-        { "type": "wm",       "key": "de"     },
-        { "type": "packages", "key": "pkgs",  "format": "{} (pacman)" },
-        { "type": "shell",    "key": "shell"  },
-        { "type": "kernel",   "key": "kernel" },
-        { "type": "uptime",   "key": "uptime", "format": "{2}h {3}m"  },
-        {
-            "type": "command",
-            "key":  "os age",
-            "text": "bash -c 'birth_install=$(stat -c %W /); current=$(date +%s); days_difference=$(( (current - birth_install) / 86400 )); echo $days_difference days'"
-        },
-        { "type": "memory",  "key": "memory"  },
-        { "type": "battery", "key": "battery" },
-        "break",
-        { "type": "colors", "symbol": "circle" },
-        "break"
-    ]
+# ---- Picom ----
+log "--- Writing picom config ---"
+PICOM_CONF="$USER_HOME/.config/picom/picom.conf"
+sudo -u "$TARGET_USER" mkdir -p "$(dirname "$PICOM_CONF")"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$PICOM_CONF" > /dev/null
+backend = "glx";
+glx-no-stencil = true;
+shadow = false;
+fading = false;
+inactive-opacity = 1.0;
+active-opacity = 1.0;
+frame-opacity = 1.0;
+vsync = true;
+corner-radius = 6;
+rounded-corners-exclude = [
+    "window_type = 'dock'",
+    "window_type = 'desktop'"
+];
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$(dirname "$PICOM_CONF")"
+log "picom config written."
+
+# ---- Dunst ----
+log "--- Writing dunst config ---"
+DUNST_DIR="$USER_HOME/.config/dunst"
+sudo -u "$TARGET_USER" mkdir -p "$DUNST_DIR"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$DUNST_DIR/dunstrc" > /dev/null
+[global]
+    font = Maple Mono 11
+    corner_radius = 8
+    frame_width = 1
+    frame_color = "#d8cab8"
+    background = "#141216"
+    foreground = "#d8cab8"
+    highlight = "#ac82e9"
+    separator_color = "#d8cab8"
+    gap_size = 6
+    origin = top-right
+    offset = 10x10
+    width = 300
+    padding = 10
+    horizontal_padding = 10
+    timeout = 5
+
+[urgency_low]
+    background = "#141216"
+    foreground = "#d8cab8"
+    frame_color = "#d8cab8"
+
+[urgency_normal]
+    background = "#141216"
+    foreground = "#d8cab8"
+    frame_color = "#d8cab8"
+
+[urgency_critical]
+    background = "#141216"
+    foreground = "#fc4649"
+    frame_color = "#fc4649"
+
+[kew]
+    appname = kew
+    skip_display = true
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$DUNST_DIR"
+log "dunst config written."
+
+# ---- Redshift ----
+log "--- Writing redshift config ---"
+REDSHIFT_CONF="$USER_HOME/.config/redshift/redshift.conf"
+sudo -u "$TARGET_USER" mkdir -p "$(dirname "$REDSHIFT_CONF")"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$REDSHIFT_CONF" > /dev/null
+[redshift]
+temp-day=6500
+temp-night=4500
+lat=33.98
+lon=-117.38
+fade=1
+gamma=1.0
+adjustment-method=randr
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$(dirname "$REDSHIFT_CONF")"
+log "redshift config written."
+
+# ---- Rofi ----
+log "--- Writing rofi config ---"
+ROFI_DIR="$USER_HOME/.config/rofi"
+sudo -u "$TARGET_USER" mkdir -p "$ROFI_DIR"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$ROFI_DIR/config.rasi" > /dev/null
+configuration {
+    modi: "drun,run";
+    font: "Maple Mono 11";
+    show-icons: true;
+    drun-display-format: "{name}";
+    location: 0;
+    disable-history: false;
+    hide-scrollbar: true;
+    display-drun: " Search";
+    sidebar-mode: false;
 }
-EOF
-chown "$TARGET_USER:$TARGET_USER" "$FASTFETCH_CONF"
-log "fastfetch config written."
 
-# ---- Kitty ----
-log "--- Writing kitty config ---"
-KITTY_DIR="$USER_HOME/.config/kitty"
-sudo -u "$TARGET_USER" mkdir -p "$KITTY_DIR"
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$KITTY_DIR/kitty.conf" > /dev/null
-font_family            JetBrainsMono NF Bold
-font_size              12.0
-bold_font              auto
-italic_font            auto
-bold_italic_font       auto
-background_opacity     0.9
-confirm_os_window_close 0
-cursor_trail           1
-linux_display_server   auto
-scrollback_lines       2000
-wheel_scroll_min_lines 1
-enable_audio_bell      no
-window_padding_width   4
-include colors.conf
+@theme "~/.config/rofi/theme.rasi"
 EOF
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$KITTY_DIR/colors.conf" > /dev/null
-cursor                #dee4e4
-cursor_text_color     #bec8c9
-foreground            #dee4e4
-background            #0e1415
-selection_foreground  #1b3437
-selection_background  #b1cbce
-url_color             #80d4dc
-
-# black
-color0   #4c4c4c
-color8   #262626
-# red
-color1   #ac8a8c
-color9   #c49ea0
-# green
-color2   #8aac8b
-color10  #9ec49f
-# yellow
-color3   #aca98a
-color11  #c4c19e
-# blue
-color4   #80d4dc
-color12  #a39ec4
-# magenta
-color5   #ac8aac
-color13  #c49ec4
-# cyan
-color6   #8aacab
-color14  #9ec3c4
-# white
-color7   #f0f0f0
-color15  #e7e7e7
-EOF
-chown -R "$TARGET_USER:$TARGET_USER" "$KITTY_DIR"
-log "kitty config written."
-
-# ---- Waybar ----
-log "--- Writing waybar config ---"
-WAYBAR_DIR="$USER_HOME/.config/waybar"
-sudo -u "$TARGET_USER" mkdir -p "$WAYBAR_DIR"
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
-{
-  "layer": "bot",
-  "spacing": 0,
-  "height": 0,
-  "margin-bottom": 0,
-  "margin-top": 8,
-  "position": "top",
-  "margin-right": 200,
-  "margin-left": 200,
-  "modules-left": [
-    "hyprland/workspaces"
-  ],
-  "modules-center": [
-    "custom/media"
-  ],
-  "modules-right": [
-    "custom/wallpaper",
-    "network",
-    "battery",
-    "pulseaudio",
-    "tray",
-    "custom/weather",
-    "clock"
-  ],
-  "hyprland/workspaces": {
-    "disable-scroll": true,
-    "all-outputs": false,
-    "tooltip": false
-  },
-  "custom/media": {
-    "format": "󰎈 {}",
-    "exec": "$HOME/.config/waybar/scripts/scroll_text.sh",
-    "on-click": "playerctl -p kew play-pause",
-    "tooltip": false
-  },
-  "custom/wallpaper": {
-    "format": "󰋩",
-    "on-click": "$HOME/.config/waybar/scripts/wallpaper_picker.sh",
-    "tooltip": false
-  },
-  "custom/weather": {
-    "format": "{}",
-    "exec": "$HOME/.config/waybar/scripts/weather.sh",
-    "interval": 900,
-    "tooltip": false
-  },
-  "tray": {
-    "spacing": 10,
-    "tooltip": false
-  },
-  "clock": {
-    "format": "󰅐  {:%H:%M}",
-    "tooltip": false
-  },
-  "network": {
-    "format-wifi": "  {bandwidthDownBits}",
-    "format-ethernet": "  {bandwidthDownBits}",
-    "format-disconnected": "󰤮  No Network",
-    "interval": 5,
-    "tooltip": false
-  },
-  "pulseaudio": {
-    "scroll-step": 5,
-    "max-volume": 150,
-    "format": "{icon}  {volume}%",
-    "format-bluetooth": "{icon}  {volume}%",
-    "format-icons": [
-      "",
-      "",
-      " "
-    ],
-    "nospacing": 1,
-    "format-muted": "  ",
-    "on-click": "pavucontrol",
-    "tooltip": false
-  },
-  "battery": {
-    "states": {
-      "warning": 30,
-      "critical": 15
-    },
-    "format": "{icon}  {capacity}%",
-    "format-charging": "󰂄  {capacity}%",
-    "format-plugged": "󰂄  {capacity}%",
-    "format-alt": "{icon}  {time}",
-    "format-full": "󱈑  {capacity}%",
-    "format-icons": [
-      "󱊡",
-      "󱊢",
-      "󱊣"
-    ]
-  }
-}
-EOF
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/style.css" > /dev/null
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$ROFI_DIR/theme.rasi" > /dev/null
 * {
-  font-family: Maple Mono;
-  border-radius: 8px;
-  font-size: 13px;
-  padding: 0px;
-  background: transparent;
+    bg:           rgba(20, 18, 22, 0.95);
+    bg-alt:       rgba(0, 0, 0, 0.2);
+    fg:           #d8cab8;
+    accent:       #ac82e9;
+    border-col:   #d8cab8;
+    background-color: transparent;
+    text-color:   @fg;
 }
 
-window#waybar {
-  background-color: rgba(20, 18, 22, 0.7);
-  border-radius: 14px;
-  padding: 0px;
-  border-style: none;
+window {
+    background-color: @bg;
+    border:           1px;
+    border-color:     @border-col;
+    border-radius:    14px;
+    width:            500px;
+    padding:          0px;
 }
 
-#network,
-#clock,
-#custom-media,
-#custom-weather,
-#custom-wallpaper,
-#battery,
-#tray,
-#workspaces,
-#pulseaudio {
-  background-color: rgba(20, 18, 22, 0.2);
-  margin: 6px;
-  margin-right: 0px;
-  padding: 2px 8px;
-  border-radius: 8px;
-  color: #d8cab8;
-  border-style: solid;
-  border-color: #d8cab8;
-  border-width: 1px;
-  transition-duration: 120ms;
-  letter-spacing: 1px;
+mainbox {
+    background-color: transparent;
+    children:         [ inputbar, listview ];
+    spacing:          0px;
+    padding:          8px;
 }
 
-#clock {
-  margin-right: 6px;
+inputbar {
+    background-color: @bg-alt;
+    border:           0px 0px 1px 0px;
+    border-color:     @border-col;
+    border-radius:    8px 8px 0px 0px;
+    padding:          12px;
+    margin:           0px 0px 8px 0px;
+    children:         [ prompt, entry ];
 }
 
-#clock:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
+prompt {
+    background-color: transparent;
+    text-color:       @accent;
+    padding:          0px 8px 0px 0px;
 }
 
-#pulseaudio:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
-  transition-duration: 120ms;
+entry {
+    background-color: transparent;
+    text-color:       @fg;
+    placeholder:      "Type to search...";
+    placeholder-color: rgba(216, 202, 184, 0.4);
 }
 
-#custom-media {
-  font-weight: bold;
-  transition-duration: 120ms;
-  padding: 0px 25px 0px 25px;
-  min-width: 280px;
-  font-family: monospace;
-  color: #ac82e9;
-  border-color: #ac82e9;
+listview {
+    background-color: transparent;
+    lines:            8;
+    scrollbar:        false;
+    spacing:          4px;
+    padding:          4px;
 }
 
-#custom-media:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #ac82e9;
-  transition-duration: 120ms;
+element {
+    background-color: transparent;
+    border-radius:    8px;
+    padding:          6px 8px;
+    spacing:          8px;
+    children:         [ element-icon, element-text ];
 }
 
-#custom-wallpaper {
-  transition-duration: 120ms;
-  padding: 0px 8px;
+element selected {
+    background-color: @bg-alt;
 }
 
-#custom-wallpaper:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #ac82e9;
-  transition-duration: 120ms;
+element-icon {
+    background-color: transparent;
+    size:             24px;
 }
 
-#custom-weather:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
-  transition-duration: 120ms;
-}
-
-#tray menu {
-  background-color: #141216;
-  color: #d8cab8;
-  padding: 4px;
-}
-
-#tray menu menuitem {
-  background-color: #27232b;
-  margin: 3px;
-  color: #d8cab8;
-  border-radius: 4px;
-  border-style: solid;
-  border-color: #27232b;
-}
-
-#tray menu menuitem:hover {
-  background-color: #27232b;
-  color: #ac82e9;
-  font-weight: bold;
-}
-
-#workspaces button {
-  transition-duration: 100ms;
-  all: initial;
-  min-width: 0;
-  font-weight: bold;
-  color: #d8cab8;
-  margin-right: 0.2cm;
-  margin-left: 0.2cm;
-}
-
-#workspaces button:hover {
-  transition-duration: 120ms;
-  color: #8f56e1;
-}
-
-#workspaces button.focused {
-  color: #ac82e9;
-  font-weight: bold;
-}
-
-#workspaces button.active {
-  color: #ac82e9;
-  font-weight: bold;
-}
-
-#workspaces button.urgent {
-  color: #fcb167;
-}
-
-#battery {
-  background-color: rgba(20, 18, 22, 0.2);
-  color: #d8cab8;
-}
-
-#battery.warning {
-  color: #fcb167;
-}
-
-#battery.critical,
-#battery.urgent {
-  color: #fc4649;
+element-text {
+    background-color: transparent;
+    text-color:       inherit;
+    vertical-align:   0.5;
 }
 EOF
-chown -R "$TARGET_USER:$TARGET_USER" "$WAYBAR_DIR"
-log "waybar config written."
 
-# ---- Waybar Scripts ----
-log "--- Writing waybar scripts ---"
-SCRIPTS_DIR="$USER_HOME/.config/waybar/scripts"
-sudo -u "$TARGET_USER" mkdir -p "$SCRIPTS_DIR"
+chown -R "$TARGET_USER:$TARGET_USER" "$ROFI_DIR"
+log "rofi config written."
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/scroll_text.sh" > /dev/null
+# ---- Polybar ----
+log "--- Writing polybar config ---"
+POLYBAR_DIR="$USER_HOME/.config/polybar"
+POLYBAR_SCRIPTS="$POLYBAR_DIR/scripts"
+sudo -u "$TARGET_USER" mkdir -p "$POLYBAR_SCRIPTS"
+
+# Launch script
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$POLYBAR_DIR/launch.sh" > /dev/null
+#!/bin/bash
+killall -q polybar
+while pgrep -u $UID -x polybar >/dev/null; do sleep 1; done
+polybar main &
+EOF
+chmod +x "$POLYBAR_DIR/launch.sh"
+
+# Main polybar config
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$POLYBAR_DIR/config.ini" > /dev/null
+[colors]
+bg         = #b2141216
+fg         = #d8cab8
+border     = #d8cab8
+accent     = #ac82e9
+accent-dim = #8f56e1
+warning    = #fcb167
+critical   = #fc4649
+transparent= #00000000
+
+[bar/main]
+width                = 75%
+height               = 36
+offset-x             = 12.5%
+offset-y             = 8
+radius               = 14
+fixed-center         = true
+
+background           = ${colors.bg}
+foreground           = ${colors.fg}
+
+line-size            = 0
+border-size          = 0
+padding-left         = 2
+padding-right        = 2
+module-margin-left   = 0
+module-margin-right  = 0
+
+font-0               = "Maple Mono:size=11:weight=bold;3"
+font-1               = "JetBrainsMono NF:size=13;3"
+font-2               = "Noto Sans CJK JP:size=11;3"
+font-3               = "monospace:size=11;3"
+
+modules-left         = workspaces
+modules-center       = media
+modules-right        = wallpaper network battery pulseaudio tray weather clock
+
+wm-restack           = i3
+override-redirect    = false
+enable-ipc           = true
+
+cursor-click         = pointer
+cursor-scroll        = ns-resize
+
+[module/workspaces]
+type                 = internal/i3
+format               = <label-state>
+index-sort           = true
+wrapping-scroll      = false
+label-focused        = %index%
+label-focused-foreground = ${colors.accent}
+label-focused-font   = 1
+label-focused-padding = 4
+label-unfocused      = %index%
+label-unfocused-foreground = ${colors.fg}
+label-unfocused-padding = 4
+label-urgent         = %index%
+label-urgent-foreground = ${colors.warning}
+label-urgent-padding = 4
+
+[module/media]
+type                 = custom/script
+exec                 = $HOME/.config/polybar/scripts/scroll_text.sh
+tail                 = true
+click-left           = playerctl -p kew play-pause
+format               = <label>
+format-prefix        = "󰎈 "
+format-prefix-font   = 2
+format-prefix-foreground = ${colors.accent}
+label                = %output%
+label-foreground     = ${colors.accent}
+label-font           = 4
+format-background    = ${colors.bg}
+format-foreground    = ${colors.accent}
+format-padding       = 8
+format-underline     = ${colors.accent}
+
+[module/wallpaper]
+type                 = custom/text
+content              = "󰋩"
+content-font         = 2
+content-foreground   = ${colors.fg}
+content-background   = ${colors.bg}
+content-padding      = 2
+click-left           = $HOME/.config/polybar/scripts/wallpaper_picker.sh
+
+[module/network]
+type                 = internal/network
+interface-type       = wireless
+interval             = 3
+format-connected     = <label-connected>
+format-connected-prefix = "  "
+format-connected-prefix-font = 2
+format-connected-prefix-foreground = ${colors.fg}
+label-connected      = %downspeed%
+label-connected-foreground = ${colors.fg}
+format-disconnected  = <label-disconnected>
+format-disconnected-prefix = "󰤮  "
+format-disconnected-prefix-font = 2
+label-disconnected   = No Network
+label-disconnected-foreground = ${colors.critical}
+format-connected-background  = ${colors.bg}
+format-disconnected-background = ${colors.bg}
+format-connected-padding  = 2
+format-disconnected-padding = 2
+
+[module/battery]
+type                 = internal/battery
+battery              = BAT0
+adapter              = AC
+; NOTE: if battery shows N/A run: ls /sys/class/power_supply/
+; adapter may be named ACAD, AC0, or ADP1 on some Dell models
+full-at              = 99
+poll-interval        = 5
+format-charging      = <label-charging>
+format-charging-prefix = "󰂄  "
+format-charging-prefix-font = 2
+label-charging       = %percentage%%
+ramp-capacity-0      = 󱊡
+ramp-capacity-1      = 󱊢
+ramp-capacity-2      = 󱊣
+ramp-capacity-font   = 2
+format-discharging   = <ramp-capacity>  <label-discharging>
+label-discharging    = %percentage%%
+format-full          = <label-full>
+format-full-prefix   = "󱈑  "
+format-full-prefix-font = 2
+label-full           = %percentage%%
+label-discharging-foreground = ${colors.fg}
+label-charging-foreground = ${colors.fg}
+label-full-foreground = ${colors.fg}
+format-charging-background  = ${colors.bg}
+format-discharging-background = ${colors.bg}
+format-full-background = ${colors.bg}
+format-charging-padding  = 2
+format-discharging-padding = 2
+format-full-padding  = 2
+
+[module/pulseaudio]
+type                 = internal/pulseaudio
+use-ui-max           = false
+interval             = 5
+format-volume        = <ramp-volume>  <label-volume>
+ramp-volume-0        = 
+ramp-volume-1        = 
+ramp-volume-2        = 
+ramp-volume-font     = 2
+label-volume         = %percentage%%
+label-volume-foreground = ${colors.fg}
+format-muted         = <label-muted>
+format-muted-prefix  = "  "
+format-muted-prefix-font = 2
+label-muted          = Muted
+label-muted-foreground = ${colors.fg}
+click-right          = pavucontrol
+format-volume-background  = ${colors.bg}
+format-muted-background   = ${colors.bg}
+format-volume-padding = 2
+format-muted-padding  = 2
+
+[module/tray]
+type                 = internal/tray
+tray-spacing         = 6px
+tray-background      = ${colors.bg}
+tray-padding         = 2
+
+[module/weather]
+type                 = custom/script
+exec                 = $HOME/.config/polybar/scripts/weather.sh
+interval             = 900
+format               = <label>
+label                = %output%
+label-foreground     = ${colors.fg}
+format-background    = ${colors.bg}
+format-padding       = 2
+
+[module/clock]
+type                 = internal/date
+interval             = 30
+date                 = "󰅐  %H:%M"
+date-alt             = "󰅐  %Y-%m-%d %H:%M"
+label                = %date%
+label-foreground     = ${colors.fg}
+format-background    = ${colors.bg}
+format-padding       = 2
+EOF
+
+# scroll_text.sh
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$POLYBAR_SCRIPTS/scroll_text.sh" > /dev/null
 #!/bin/bash
 
 PLAYER="kew"
@@ -912,18 +854,19 @@ while true; do
         echo "$chunk"
     fi
 
-    offset=$(( (offset + 1) % padded_len ))
+    [ "$padded_len" -gt 0 ] && offset=$(( (offset + 1) % padded_len ))
     tick=$((tick + 1))
     sleep "$SCROLL_DELAY"
 done
 EOF
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/weather.sh" > /dev/null
+# weather.sh
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$POLYBAR_SCRIPTS/weather.sh" > /dev/null
 #!/bin/bash
 
 LAT="33.9806"
 LON="-117.3755"
-CACHE_FILE="$HOME/.cache/waybar_weather.txt"
+CACHE_FILE="$HOME/.cache/polybar_weather.txt"
 
 data=$(curl -sf --max-time 5 "https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON&current_weather=true&temperature_unit=fahrenheit" 2>/dev/null)
 
@@ -955,12 +898,13 @@ echo "$result" > "$CACHE_FILE"
 echo "$result"
 EOF
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/wallpaper_picker.sh" > /dev/null
+# wallpaper_picker.sh — uses feh instead of swww
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$POLYBAR_SCRIPTS/wallpaper_picker.sh" > /dev/null
 #!/bin/bash
 
 WALLPAPER_DIR="$HOME/Pictures/wallpapers"
 CACHE_DIR="$HOME/.cache/wallpaper_thumbs"
-LIST_CACHE="$CACHE_DIR/wofi_list.txt"
+LIST_CACHE="$CACHE_DIR/rofi_list.txt"
 
 mkdir -p "$CACHE_DIR"
 
@@ -971,136 +915,111 @@ if [ ! -f "$LIST_CACHE" ] || [ "$WALLPAPER_DIR" -nt "$LIST_CACHE" ]; then
         if [ ! -f "$thumb" ]; then
             magick "$img"[0] -thumbnail 200x200^ -gravity center -extent 200x200 "$thumb" 2>/dev/null
         fi
-        echo "img:$thumb:text:$img"
+        echo "$(basename "$img")|$img"
     done > "$LIST_CACHE"
 fi
 
-selected=$(cat "$LIST_CACHE" | wofi --dmenu --allow-images --prompt "Wallpaper" --location=center)
+selected=$(awk -F'|' '{print $1}' "$LIST_CACHE" | rofi -dmenu -p "Wallpaper" -i)
 
 if [ -n "$selected" ]; then
-    full_path=$(echo "$selected" | sed 's/.*text://')
-    swww img "$full_path" --transition-type wipe --transition-duration 1 --transition-fps 60
+    full_path=$(awk -F'|' -v sel="$selected" '$1==sel {print $2; exit}' "$LIST_CACHE")
+    feh --bg-fill "$full_path"
+    cp "$full_path" ~/.config/i3/wallpaper
 fi
 EOF
 
-chmod +x "$SCRIPTS_DIR/scroll_text.sh"
-chmod +x "$SCRIPTS_DIR/weather.sh"
-chmod +x "$SCRIPTS_DIR/wallpaper_picker.sh"
-chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
-log "waybar scripts written."
+chmod +x "$POLYBAR_SCRIPTS/scroll_text.sh"
+chmod +x "$POLYBAR_SCRIPTS/weather.sh"
+chmod +x "$POLYBAR_SCRIPTS/wallpaper_picker.sh"
+chown -R "$TARGET_USER:$TARGET_USER" "$POLYBAR_DIR"
+log "polybar config and scripts written."
 
-# ---- Wofi ----
-log "--- Writing wofi config ---"
-WOFI_DIR="$USER_HOME/.config/wofi"
-sudo -u "$TARGET_USER" mkdir -p "$WOFI_DIR"
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/config" > /dev/null
-show=drun
-term=kitty
-show_all=true
-gtk_dark=false
-location=center
-insensitive=false
-allow_markup=true
-allow_images=true
-line_wrap=word
-lines=8
-width=500
-no_actions=false
-prompt= Search | 검색 | Поиск | Sök
-hide_scroll=true
-EOF
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/style.css" > /dev/null
-* {
-  font-family: Maple Mono;
-  background: transparent;
-  color: #d8cab8;
-}
-
-#window {
-  color: #d8cab8;
-  border-color: #d8cab8;
-  border-style: solid;
-  border-width: 1px;
-  background-color: rgba(20, 18, 22, 0.7);
-  border-radius: 14px;
-}
-
-#scroll {
-  border-top-style: solid;
-  border-width: 1px;
-  border-color: #d8cab8;
-}
-
-#inner-box {
-  padding-top: 12px;
-}
-
-#entry {
-  border-style: none;
-  color: #d8cab8;
-  padding: 6px;
-  margin-bottom: 8px;
-  margin-left: 12px;
-  margin-right: 12px;
-  border-radius: 8px;
-}
-
-#entry:selected {
-  background-color: rgba(0, 0, 0, 0.2);
-  border-style: none;
-  color: #d8cab8;
-  font-weight: bold;
-  outline: none;
-}
-
-#input {
-  background-color: rgba(0, 0, 0, 0.2);
-  color: #d8cab8;
-  border-color: #d8cab8;
-  border-style: none;
-  border-bottom-style: solid;
-  border-width: 1px;
-  font-style: normal;
-  border-radius: 8px;
-  border-bottom-left-radius: 0px;
-  border-bottom-right-radius: 0px;
-  padding: 12px;
-  margin: 8px;
-}
-
-#input:focus {
-  background-color: rgba(0, 0, 0, 0.2);
-  border-color: #ac82e9;
-  font-style: italic;
-}
-
-#img {
-  padding: 4px;
-  margin-right: 6px;
-}
-EOF
-chown -R "$TARGET_USER:$TARGET_USER" "$WOFI_DIR"
-log "wofi config written."
-
-# ---- Swaync ----
-log "--- Writing swaync config ---"
-SWAYNC_DIR="$USER_HOME/.config/swaync"
-sudo -u "$TARGET_USER" mkdir -p "$SWAYNC_DIR"
-
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SWAYNC_DIR/config.json" > /dev/null
+# ---- Fastfetch ----
+log "--- Writing fastfetch config ---"
+FASTFETCH_CONF="$USER_HOME/.config/fastfetch/config.jsonc"
+sudo -u "$TARGET_USER" mkdir -p "$(dirname "$FASTFETCH_CONF")"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$FASTFETCH_CONF" > /dev/null
 {
-  "notification-visibility": {
-    "kew": {
-      "state": "ignored",
-      "app-name": "kew"
-    }
-  }
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "source": "arch_small",
+        "padding": { "top": 1, "left": 2 }
+    },
+    "display": { "separator": "  " },
+    "modules": [
+        "break",
+        "title",
+        { "type": "os",       "key": "os"     },
+        { "type": "wm",       "key": "wm"     },
+        { "type": "packages", "key": "pkgs",  "format": "{} (pacman)" },
+        { "type": "shell",    "key": "shell"  },
+        { "type": "kernel",   "key": "kernel" },
+        { "type": "uptime",   "key": "uptime", "format": "{2}h {3}m" },
+        {
+            "type": "command",
+            "key":  "os age",
+            "text": "bash -c 'birth_install=$(stat -c %W /); current=$(date +%s); days_difference=$(( (current - birth_install) / 86400 )); echo $days_difference days'"
+        },
+        { "type": "memory",  "key": "memory"  },
+        { "type": "battery", "key": "battery" },
+        "break",
+        { "type": "colors", "symbol": "circle" },
+        "break"
+    ]
 }
 EOF
-chown -R "$TARGET_USER:$TARGET_USER" "$SWAYNC_DIR"
-log "swaync config written."
+chown "$TARGET_USER:$TARGET_USER" "$FASTFETCH_CONF"
+log "fastfetch config written."
+
+# ---- Kitty ----
+log "--- Writing kitty config ---"
+KITTY_DIR="$USER_HOME/.config/kitty"
+sudo -u "$TARGET_USER" mkdir -p "$KITTY_DIR"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$KITTY_DIR/kitty.conf" > /dev/null
+font_family            JetBrainsMono NF Bold
+font_size              12.0
+bold_font              auto
+italic_font            auto
+bold_italic_font       auto
+background_opacity     0.9
+confirm_os_window_close 0
+cursor_trail           1
+linux_display_server   auto
+scrollback_lines       2000
+wheel_scroll_min_lines 1
+enable_audio_bell      no
+window_padding_width   4
+include colors.conf
+EOF
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$KITTY_DIR/colors.conf" > /dev/null
+cursor                #dee4e4
+cursor_text_color     #bec8c9
+foreground            #dee4e4
+background            #0e1415
+selection_foreground  #1b3437
+selection_background  #b1cbce
+url_color             #80d4dc
+color0   #4c4c4c
+color8   #262626
+color1   #ac8a8c
+color9   #c49ea0
+color2   #8aac8b
+color10  #9ec49f
+color3   #aca98a
+color11  #c4c19e
+color4   #80d4dc
+color12  #a39ec4
+color5   #ac8aac
+color13  #c49ec4
+color6   #8aacab
+color14  #9ec3c4
+color7   #f0f0f0
+color15  #e7e7e7
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$KITTY_DIR"
+log "kitty config written."
 
 # ---- Fastfetch on terminal open ----
 BASHRC="$USER_HOME/.bashrc"
@@ -1108,15 +1027,25 @@ sudo -u "$TARGET_USER" touch "$BASHRC"
 if ! grep -q "fastfetch auto-run" "$BASHRC"; then
     cat <<'EOF' | sudo -u "$TARGET_USER" tee -a "$BASHRC" > /dev/null
 
-# fastfetch auto-run — added by arch_install_laptop.sh
+# fastfetch auto-run — added by arch_install_laptop_i3.sh
 fastfetch
 EOF
-    log ".bashrc updated — fastfetch will run on every new terminal."
+    log ".bashrc updated."
 fi
 
-# ---- Screenshots & Wallpapers directories ----
+# ---- Directories ----
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/Screenshots"
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/wallpapers"
+
+# Generate a default solid-color wallpaper so feh doesn't error on first boot
+# before the user picks one via SUPER+Z
+DEFAULT_WALL="$USER_HOME/Pictures/wallpapers/default.png"
+if [ ! -f "$DEFAULT_WALL" ]; then
+    sudo -u "$TARGET_USER" magick -size 1920x1080 xc:#141216 "$DEFAULT_WALL" 2>/dev/null &&         log "Default wallpaper generated." ||         log "WARNING: Could not generate default wallpaper — run 'magick -size 1920x1080 xc:#141216 ~/Pictures/wallpapers/default.png' manually."
+fi
+# Pre-set it as the active wallpaper for feh to load on first login
+cp "$DEFAULT_WALL" "$USER_HOME/.config/i3/wallpaper" 2>/dev/null || true
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.config/i3/wallpaper" 2>/dev/null || true
 
 # =========================================================
 # --- 16. Enable Login Manager ---
@@ -1131,38 +1060,57 @@ echo ""
 echo "============================================="
 echo "           SETUP COMPLETE"
 echo "============================================="
-echo "  Standard Arch repos (no CachyOS — Sandy Bridge is x86_64_v2)."
-echo "  linux-lts kernel installed (stable, better for older hardware)."
-echo "  Intel microcode (intel-ucode) installed."
-echo "  nouveau graphics stack via mesa/gallium."
+echo "  Standard Arch repos, linux-lts kernel."
+echo "  nvidia-390xx-dkms installed — nouveau blacklisted."
+echo "  i3 window manager with polybar."
 echo "  TLP power management enabled."
-echo "  PipeWire user services enabled."
-echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist, kew in exec-once."
+echo "  PipeWire audio enabled."
 echo ""
 echo "  App configs written:"
-echo "    - fastfetch      → ~/.config/fastfetch/config.jsonc (includes battery)"
-echo "    - kitty          → ~/.config/kitty/kitty.conf + colors.conf"
-echo "    - waybar         → ~/.config/waybar/config.json + style.css"
-echo "    - waybar scripts → scroll_text.sh, weather.sh, wallpaper_picker.sh"
-echo "    - wofi           → ~/.config/wofi/config + style.css"
-echo "    - swaync         → ~/.config/swaync/config.json (kew notifications silenced)"
-echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
-echo "    - Screenshots pre-created at ~/Pictures/Screenshots"
-echo "    - Wallpapers directory pre-created at ~/Pictures/wallpapers"
+echo "    - i3        → ~/.config/i3/config"
+echo "    - polybar   → ~/.config/polybar/config.ini + scripts/"
+echo "    - picom     → ~/.config/picom/picom.conf"
+echo "    - dunst     → ~/.config/dunst/dunstrc"
+echo "    - redshift  → ~/.config/redshift/redshift.conf"
+echo "    - rofi      → ~/.config/rofi/config.rasi + theme.rasi"
+echo "    - kitty     → ~/.config/kitty/kitty.conf + colors.conf"
+echo "    - fastfetch → ~/.config/fastfetch/config.jsonc"
+echo ""
+echo "  Replacements from Hyprland setup:"
+echo "    wofi       → rofi"
+echo "    waybar     → polybar"
+echo "    swww       → feh (SUPER+Z to pick)"
+echo "    hyprlock   → i3lock"
+echo "    hypridle   → xautolock (10 min)"
+echo "    hyprsunset → redshift"
+echo "    hyprshot   → maim (SUPER+SHIFT+S)"
+echo "    swaync     → dunst (kew silenced)"
+echo ""
+echo "  IMPORTANT after each kernel update:"
+echo "    sudo mkinitcpio -P"
 echo ""
 echo "  Next steps after reboot:"
 echo "    - Add wallpapers to ~/Pictures/wallpapers"
-echo "    - Set initial wallpaper: swww img /path/to/wallpaper"
-echo "    - Open wallpaper picker: SUPER+Z"
-echo "    - Configure Qt theming: qt6ct"
-echo "    - Check battery status: cat /sys/class/power_supply/BAT0/status"
-echo "    - Monitor power usage: sudo powertop"
-echo "    - Check TLP status: sudo tlp-stat -s"
-echo "    - If display is wrong resolution: hyprctl monitors all"
-echo "      then adjust eDP-1 line in ~/.config/hypr/hyprland.conf"
-echo "    - Brightness keys (Fn+F4/F5) and volume keys work out of the box"
-echo "    - Music controls: SUPER+ALT+P/Left/Right via kew+playerctl"
-echo "    - Log in via ly and enjoy Hyprland"
+echo "    - Pick wallpaper: SUPER+Z"
+echo "    - Configure Qt: qt6ct"
+echo "    - Log in via ly and enjoy i3"
+echo ""
+echo "  Post-reboot checks:"
+echo "    nvidia-smi                   -> should show Quadro 1000M"
+echo "    glxinfo | grep render        -> should show NVIDIA, not llvmpipe"
+echo "    cat /proc/driver/nvidia/version -> confirms driver version"
+echo ""
+echo "  If black screen on reboot:"
+echo "    1. At GRUB menu press 'e', add 'nomodeset' to kernel line, boot"
+echo "    2. Check /var/log/Xorg.0.log for errors"
+echo "    3. Check AUR patches: https://aur.archlinux.org/packages/nvidia-390xx-dkms"
+echo ""
+echo "  Nouveau fallback (if nvidia-390xx won't cooperate):"
+echo "    sudo rm /etc/modprobe.d/blacklist-nouveau.conf"
+echo "    sudo mkinitcpio -P"
+echo "    sudo sed -i \'s/ nvidia-drm.modeset=1//\' /etc/default/grub"
+echo "    sudo grub-mkconfig -o /boot/grub/grub.cfg"
+echo "    reboot"
 echo "============================================="
 echo ""
 read -p "Reboot now? (y/N): " reboot_choice
