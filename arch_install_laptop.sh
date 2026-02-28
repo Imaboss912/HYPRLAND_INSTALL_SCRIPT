@@ -182,30 +182,18 @@ pacman -S --needed --noconfirm \
 # --- 9. Desktop Stack ---
 # =========================================================
 log "--- Installing i3 & Desktop Environment ---"
-pacman -S --needed --noconfirm \
-    i3-wm i3lock \
-    polybar \
-    rofi \
-    picom \
-    feh \
-    dunst \
-    xautolock \
-    redshift \
-    maim xdotool xclip \
-    kitty \
-    noto-fonts noto-fonts-cjk ttf-jetbrains-mono-nerd \
-    ttf-dejavu ttf-roboto ttf-font-awesome \
-    pcmanfm-qt gvfs gvfs-mtp gvfs-smb gvfs-afc \
-    brightnessctl \
-    fcitx5 fcitx5-mozc fcitx5-configtool \
-    firefox mpv \
-    btop fastfetch nsxiv filelight \
-    gparted smartmontools transmission-qt \
-    zram-generator \
-    networkmanager blueman network-manager-applet \
-    bluez bluez-utils \
-    imagemagick \
-    flatpak
+# Install in groups — if one package name has changed in repos,
+# only that group fails rather than aborting the whole script
+pacman -S --needed --noconfirm i3-wm i3lock polybar rofi picom feh dunst redshift ||     log "WARNING: some WM/compositor packages failed — check names above"
+pacman -S --needed --noconfirm maim xdotool xclip xss-lock kitty ||     log "WARNING: some utility packages failed"
+pacman -S --needed --noconfirm     noto-fonts noto-fonts-cjk ttf-jetbrains-mono-nerd     ttf-dejavu ttf-roboto ttf-font-awesome ||     log "WARNING: some font packages failed"
+pacman -S --needed --noconfirm     pcmanfm-qt gvfs gvfs-mtp gvfs-smb gvfs-afc     brightnessctl ||     log "WARNING: some file manager/hardware packages failed"
+pacman -S --needed --noconfirm     fcitx5 fcitx5-mozc fcitx5-configtool ||     log "WARNING: fcitx5 packages failed — Japanese input may not work"
+pacman -S --needed --noconfirm firefox mpv ||     log "WARNING: browser/media packages failed"
+pacman -S --needed --noconfirm     btop fastfetch nsxiv filelight     gparted smartmontools transmission-qt ||     log "WARNING: some utility app packages failed"
+pacman -S --needed --noconfirm zram-generator ||     log "WARNING: zram-generator failed"
+pacman -S --needed --noconfirm     networkmanager blueman network-manager-applet     bluez bluez-utils ||     log "WARNING: network/bluetooth packages failed"
+pacman -S --needed --noconfirm imagemagick flatpak ||     log "WARNING: imagemagick/flatpak failed" 
 
 # =========================================================
 # --- 10. Laptop Power Management ---
@@ -337,7 +325,7 @@ exec --no-startup-id fcitx5 -d
 exec --no-startup-id dunst
 exec --no-startup-id nm-applet
 exec --no-startup-id redshift
-exec --no-startup-id xautolock -time 10 -locker i3lock
+exec --no-startup-id xss-lock -- i3lock
 exec --no-startup-id greenclip daemon
 exec --no-startup-id kew
 exec --no-startup-id xset r rate 300 50
@@ -1152,7 +1140,7 @@ echo "    wofi       → rofi"
 echo "    waybar     → polybar"
 echo "    swww       → feh (SUPER+Z to pick)"
 echo "    hyprlock   → i3lock"
-echo "    hypridle   → xautolock (10 min)"
+echo "    hypridle   → xss-lock (locks on idle/suspend)"
 echo "    hyprsunset → redshift"
 echo "    hyprshot   → maim (SUPER+SHIFT+S)"
 echo "    swaync     → dunst (kew silenced)"
