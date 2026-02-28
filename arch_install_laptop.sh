@@ -285,7 +285,32 @@ else
 fi
 
 # =========================================================
-# --- 14. i3 Config ---
+# --- 14. Backup Existing Configs ---
+# =========================================================
+BACKUP_DIR="$USER_HOME/.config_backup_$(date +%Y%m%d_%H%M%S)"
+BACKED_UP=0
+for d in i3 polybar rofi picom dunst kitty redshift fastfetch; do
+    if [ -d "$USER_HOME/.config/$d" ]; then
+        sudo -u "$TARGET_USER" mkdir -p "$BACKUP_DIR"
+        sudo -u "$TARGET_USER" cp -r "$USER_HOME/.config/$d" "$BACKUP_DIR/$d"
+        BACKED_UP=1
+    fi
+done
+for f in .xprofile .xinitrc; do
+    if [ -f "$USER_HOME/$f" ]; then
+        sudo -u "$TARGET_USER" mkdir -p "$BACKUP_DIR"
+        sudo -u "$TARGET_USER" cp "$USER_HOME/$f" "$BACKUP_DIR/$f"
+        BACKED_UP=1
+    fi
+done
+if [ "$BACKED_UP" -eq 1 ]; then
+    log "Existing configs backed up to $BACKUP_DIR"
+else
+    log "No existing configs found — skipping backup."
+fi
+
+# =========================================================
+# --- 15. i3 Config ---
 # =========================================================
 log "--- Writing i3 config ---"
 I3_DIR="$USER_HOME/.config/i3"
@@ -426,7 +451,7 @@ chown -R "$TARGET_USER:$TARGET_USER" "$I3_DIR"
 log "i3 config written."
 
 # =========================================================
-# --- 15. App Configs ---
+# --- 16. App Configs ---
 # =========================================================
 
 # ---- Picom ----
@@ -1094,7 +1119,7 @@ cp "$DEFAULT_WALL" "$USER_HOME/.config/i3/wallpaper" 2>/dev/null || true
 chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.config/i3/wallpaper" 2>/dev/null || true
 
 # =========================================================
-# --- 16. Enable Login Manager ---
+# --- 17. Enable Login Manager ---
 # =========================================================
 if ! command -v ly &> /dev/null; then
     pacman -S --needed --noconfirm ly 2>/dev/null || \
