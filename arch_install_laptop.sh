@@ -202,7 +202,6 @@ sudo -u "$TARGET_USER" xdg-user-dirs-update
 
 # TLP for power saving — mask rfkill services so they don't conflict
 systemctl enable tlp
-systemctl enable tlp-rdw
 systemctl mask systemd-rfkill.service || true
 systemctl mask systemd-rfkill.socket || true
 
