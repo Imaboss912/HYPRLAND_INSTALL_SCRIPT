@@ -21,8 +21,7 @@ TARGET_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 LOGFILE="/var/log/arch_install.log"
 
-# Simple timestamped logger — writes to terminal AND logfile without redirecting
-# stdout/stderr, so pacman, interactive scripts and prompts all work normally.
+# Simple timestamped logger
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
@@ -39,7 +38,7 @@ echo ""
 read -p "Enter your country for mirror optimization (e.g. US, GB, DE, AU) [default: US]: " MIRROR_COUNTRY
 MIRROR_COUNTRY="${MIRROR_COUNTRY:-US}"
 
-read -p "Install Gaming Stack (Steam / Lutris)? (y/N): " install_games
+read -p "Install Gaming Stack (Steam / Lutris / cachyos-gaming-meta)? (y/N): " install_games
 install_games="${install_games:-N}"
 
 install_rocm="N"
@@ -49,17 +48,25 @@ if [[ "$install_games" =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
+read -p "Weather widget latitude  [default: 33.9806 (Riverside, CA)]: " WEATHER_LAT
+WEATHER_LAT="${WEATHER_LAT:-33.9806}"
+read -p "Weather widget longitude [default: -117.3755 (Riverside, CA)]: " WEATHER_LON
+WEATHER_LON="${WEATHER_LON:-117.3755}"
+
+echo ""
 log "Mirror country : $MIRROR_COUNTRY"
 log "Gaming stack   : $install_games"
 log "ROCm           : $install_rocm"
+log "Weather coords : $WEATHER_LAT, $WEATHER_LON"
 log "Starting unattended install..."
 echo ""
 
 # =========================================================
-# --- 2. Base Updates & Mirror Optimization ---
+# --- 2. Base Tools & Mirror Optimization ---
+# NOTE: No full system upgrade yet — CachyOS repos are added in section 4
+# so the upgrade picks up all CachyOS packages in one pass.
 # =========================================================
-log "--- Updating system & optimizing mirrors ---"
-pacman -Syu --noconfirm
+log "--- Installing base tools & optimizing mirrors ---"
 pacman -S --needed --noconfirm \
     reflector git base-devel curl rsync \
     unzip zip tar wget p7zip unrar \
@@ -72,19 +79,18 @@ reflector --country "$MIRROR_COUNTRY" --protocol https --latest 15 --sort rate -
 # =========================================================
 log "--- Enabling Multilib repository & parallel downloads ---"
 sed -i '/\[multilib\]/,/Include/s/^[ ]*#//' /etc/pacman.conf
-# Enable parallel downloads if not already set (speeds up large installs)
 grep -q '^ParallelDownloads' /etc/pacman.conf || \
     sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 10/' /etc/pacman.conf
 pacman -Syy --noconfirm
 
 # =========================================================
-# --- 4. CachyOS Repositories ---
+# --- 4. CachyOS Repositories & Full System Upgrade ---
+# Upgrade happens here so CachyOS optimized packages are included from start.
 # =========================================================
 log "--- Adding CachyOS Repos ---"
 curl -L https://mirror.cachyos.org/cachyos-repo.tar.xz -o /tmp/cachyos-repo.tar.xz
 tar xf /tmp/cachyos-repo.tar.xz -C /tmp
 
-# Subshell so cd cannot affect the rest of the script
 (
     cd /tmp/cachyos-repo
     chmod +x ./cachyos-repo.sh
@@ -98,11 +104,10 @@ fi
 
 rm -rf /tmp/cachyos-repo*
 
-# cachyos-gaming-meta brings in a full optimised stack: mesa-git, vulkan-radeon-git,
-# libva, jack, wine etc. Do NOT install conflicting stable versions in later sections.
-pacman -Syu --needed --noconfirm cachyos-settings cachyos-hooks cachyos-gaming-meta
+log "--- Full system upgrade with CachyOS repos active ---"
+pacman -Syu --needed --noconfirm cachyos-settings cachyos-hooks
 
-# yay available in CachyOS repos — fall back to building from AUR if not found.
+# yay — available in CachyOS repos, fall back to AUR build if not found
 if ! pacman -S --needed --noconfirm yay 2>/dev/null; then
     log "WARNING: yay not in CachyOS repos — building from AUR as fallback."
     (
@@ -133,11 +138,11 @@ else
 fi
 
 # =========================================================
-# --- 6. Graphics Stack extras ---
+# --- 6. Graphics Stack ---
 # =========================================================
-log "--- Installing Graphics Stack extras ---"
-# cachyos-gaming-meta already provides mesa-git/vulkan-radeon-git/libva — installing
-# stable versions here would conflict. Only add tools that sit on top.
+log "--- Installing Graphics Stack ---"
+# cachyos-gaming-meta (mesa-git, vulkan-radeon-git, wine etc.) is installed
+# conditionally in section 12 — do not add conflicting stable versions here.
 pacman -S --needed --noconfirm \
     vulkan-tools \
     gamescope ffmpeg
@@ -146,7 +151,7 @@ pacman -S --needed --noconfirm \
 # --- 7. Audio Stack (PipeWire) ---
 # =========================================================
 log "--- Installing PipeWire audio stack ---"
-# pipewire-jack omitted — cachyos-gaming-meta installs jack which conflicts with it.
+# pipewire-jack omitted — cachyos-gaming-meta installs jack which conflicts.
 pacman -S --needed --noconfirm \
     pipewire pipewire-audio pipewire-alsa pipewire-pulse \
     wireplumber pavucontrol pamixer playerctl
@@ -155,7 +160,6 @@ pacman -S --needed --noconfirm \
 # --- 8. Qt / Wayland Integration ---
 # =========================================================
 log "--- Installing Qt Wayland support ---"
-# qt6ct-kde (AUR, section 11) replaces vanilla qt6ct — only install platform plugins here.
 pacman -S --needed --noconfirm qt5-wayland qt6-wayland
 
 # =========================================================
@@ -179,7 +183,9 @@ pacman -S --needed --noconfirm \
     gparted smartmontools transmission-qt \
     zram-generator \
     blueman network-manager-applet \
-    imagemagick
+    imagemagick \
+    nwg-look papirus-icon-theme \
+    qt5ct kvantum tumbler
 
 pacman -S --needed --noconfirm ananicy-cpp || \
     log "ananicy-cpp not in repos — will install via yay in AUR section."
@@ -204,26 +210,29 @@ sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild \
     ttf-maple \
     lmstudio-bin \
     kew-git \
-    stremio
+    stremio \
+    matugen \
+    adw-gtk-theme-git
 
-# Auto-detect hyprpolkit binary name — shipped as both 'hyprpolkit' and 'hyprpolkit-agent'
+# Auto-detect hyprpolkit binary name
 if command -v hyprpolkit-agent &> /dev/null; then
     HYPRPOLKIT_BIN="hyprpolkit-agent"
 elif command -v hyprpolkit &> /dev/null; then
     HYPRPOLKIT_BIN="hyprpolkit"
 else
-    log "WARNING: hyprpolkit binary not found — defaulting to 'hyprpolkit', adjust if needed."
+    log "WARNING: hyprpolkit binary not found — defaulting to 'hyprpolkit'."
     HYPRPOLKIT_BIN="hyprpolkit"
 fi
 log "Detected hyprpolkit binary: $HYPRPOLKIT_BIN"
 
 # =========================================================
 # --- 12. Gaming Stack (Optional) ---
+# cachyos-gaming-meta installs here to avoid conflicts with stable
+# mesa/vulkan packages that would be pulled in unconditionally.
 # =========================================================
 if [[ "$install_games" =~ ^[Yy]$ ]]; then
     log "--- Installing Gaming Stack ---"
-    # wine/winetricks omitted — cachyos-gaming-meta already provides its own wine build.
-    pacman -S --needed --noconfirm steam lutris
+    pacman -S --needed --noconfirm steam lutris cachyos-gaming-meta
 
     if [[ "$install_rocm" =~ ^[Yy]$ ]]; then
         log "--- Installing ROCm HIP SDK ---"
@@ -245,7 +254,7 @@ systemctl enable --now bluetooth
 # ly runs on tty2 — disable getty@tty2 to free it up
 systemctl disable getty@tty2 || true
 
-# PipeWire must be enabled at the user level to autostart in Hyprland sessions
+# PipeWire must be enabled at user level to autostart in Hyprland sessions
 sudo -u "$TARGET_USER" systemctl --user enable pipewire pipewire-pulse wireplumber
 
 # --- zram ---
@@ -306,6 +315,9 @@ else
 # =============================================================================
 # Auto-Injected — marker used by install script to detect re-runs
 
+# Material You border colors — regenerated by matugen on every wallpaper change
+source = ~/.config/hypr/colors.conf
+
 
 # =============================================================================
 # MONITORS
@@ -319,14 +331,26 @@ monitor=DP-3, 2560x1440@143.96, -2560x0, 1
 # STARTUP (exec-once)
 # =============================================================================
 
-exec-once = waybar
+# Pass Wayland environment to DBus and systemd before anything else —
+# required for xdg-desktop-portal to initialize quickly and correctly.
+exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+exec-once = systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+
 exec-once = swww-daemon
-exec-once = fcitx5 -d
 exec-once = HYPRPOLKIT_PLACEHOLDER
-exec-once = hyprsunset -t 4500
 exec-once = swaync
+exec-once = fcitx5 -d
+exec-once = hyprsunset -t 4500
 exec-once = wl-paste --watch cliphist store
-exec-once = kew
+
+# Restore last wallpaper and regenerate matugen colors
+exec-once = sleep 0.3 && ~/.config/scripts/wallpaper.sh --reload
+# Start waybar after wallpaper/colors are ready
+exec-once = sleep 0.5 && waybar
+# Pre-warm xdg-desktop-portal so first app launch isn't slow
+exec-once = sleep 1 && /usr/lib/xdg-desktop-portal-hyprland
+exec-once = sleep 1.5 && systemctl --user restart xdg-desktop-portal
+exec-once = sleep 2 && kew
 
 
 # =============================================================================
@@ -338,6 +362,7 @@ env = HYPRCURSOR_SIZE,24
 
 env = XMODIFIERS,@im=fcitx
 
+# Qt theming — qt6ct-kde is installed; run qt6ct after first login to configure.
 env = QT_QPA_PLATFORMTHEME,qt6ct
 env = QT_QPA_PLATFORM,wayland
 
@@ -358,8 +383,7 @@ $menu        = pgrep wofi > /dev/null 2>&1 && killall wofi || wofi --show drun
 # WORKSPACES
 # =============================================================================
 
-workspace = 9, monitor:DP-3, default:true
-workspace = 9, persistent:true
+workspace = 9, monitor:DP-3, default:true, persistent:true
 
 
 # =============================================================================
@@ -400,8 +424,8 @@ general {
 
     border_size = 1
 
-    col.active_border   = rgb(d8cab8)
-    col.inactive_border = rgb(AC82E9)
+    col.active_border   = $active_border
+    col.inactive_border = $inactive_border
 
     resize_on_border = true
     layout           = dwindle
@@ -517,6 +541,329 @@ fi
 # --- 15. App Configs ---
 # =========================================================
 
+# ---- Matugen ----
+log "--- Writing matugen config and templates ---"
+MATUGEN_DIR="$USER_HOME/.config/matugen"
+sudo -u "$TARGET_USER" mkdir -p "$MATUGEN_DIR/templates"
+
+# config.toml — unquoted heredoc so $USER_HOME expands
+cat << EOF | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/config.toml" > /dev/null
+# ~/.config/matugen/config.toml
+# Matugen generates Material You colors from your wallpaper
+# and renders all templates below automatically.
+
+[config]
+reload_gtk_theme = true
+set_wallpaper = false
+
+[templates.waybar-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/waybar-colors.css"
+output_path = "$USER_HOME/.config/waybar/colors.css"
+
+[templates.kitty-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/kitty-colors.conf"
+output_path = "$USER_HOME/.config/kitty/colors.conf"
+
+[templates.wofi-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/wofi-colors.css"
+output_path = "$USER_HOME/.config/wofi/colors.css"
+
+[templates.gtk-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/gtk-colors.css"
+output_path = "$USER_HOME/.config/gtk-3.0/colors.css"
+
+[templates.gtk4-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/gtk-colors.css"
+output_path = "$USER_HOME/.config/gtk-4.0/colors.css"
+
+[templates.hyprland-colors]
+input_path  = "$USER_HOME/.config/matugen/templates/hyprland-colors.conf"
+output_path = "$USER_HOME/.config/hypr/colors.conf"
+
+[templates.swaync]
+input_path  = "$USER_HOME/.config/matugen/templates/swaync-style.css"
+output_path = "$USER_HOME/.config/swaync/style.css"
+EOF
+
+# Waybar colors template
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/waybar-colors.css" > /dev/null
+/* Auto-generated by matugen — do not edit by hand. */
+
+@define-color primary                  {{colors.primary.default.hex}};
+@define-color on_primary               {{colors.on_primary.default.hex}};
+@define-color primary_container        {{colors.primary_container.default.hex}};
+@define-color on_primary_container     {{colors.on_primary_container.default.hex}};
+@define-color secondary                {{colors.secondary.default.hex}};
+@define-color on_secondary             {{colors.on_secondary.default.hex}};
+@define-color secondary_container      {{colors.secondary_container.default.hex}};
+@define-color on_secondary_container   {{colors.on_secondary_container.default.hex}};
+@define-color tertiary                 {{colors.tertiary.default.hex}};
+@define-color on_tertiary              {{colors.on_tertiary.default.hex}};
+@define-color background               {{colors.background.default.hex}};
+@define-color on_background            {{colors.on_background.default.hex}};
+@define-color surface                  {{colors.surface.default.hex}};
+@define-color on_surface               {{colors.on_surface.default.hex}};
+@define-color surface_variant          {{colors.surface_variant.default.hex}};
+@define-color on_surface_variant       {{colors.on_surface_variant.default.hex}};
+@define-color outline                  {{colors.outline.default.hex}};
+@define-color outline_variant          {{colors.outline_variant.default.hex}};
+@define-color error                    {{colors.error.default.hex}};
+@define-color on_error                 {{colors.on_error.default.hex}};
+EOF
+
+# Kitty colors template
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/kitty-colors.conf" > /dev/null
+# Auto-generated by matugen — source of truth is the template.
+# Included by kitty.conf via: include colors.conf
+
+background            {{colors.background.default.hex}}
+foreground            {{colors.on_background.default.hex}}
+
+selection_background  {{colors.primary.default.hex}}
+selection_foreground  {{colors.on_primary.default.hex}}
+
+cursor                {{colors.primary.default.hex}}
+cursor_text_color     {{colors.on_primary.default.hex}}
+
+url_color             {{colors.tertiary.default.hex}}
+
+color0  {{colors.surface.default.hex}}
+color8  {{colors.surface_variant.default.hex}}
+color1  {{colors.error.default.hex}}
+color9  {{colors.error.default.hex}}
+color2  {{colors.tertiary.default.hex}}
+color10 {{colors.tertiary_container.default.hex}}
+color3  {{colors.secondary.default.hex}}
+color11 {{colors.secondary_container.default.hex}}
+color4  {{colors.primary.default.hex}}
+color12 {{colors.primary_container.default.hex}}
+color5  {{colors.on_tertiary_container.default.hex}}
+color13 {{colors.tertiary.default.hex}}
+color6  {{colors.on_secondary_container.default.hex}}
+color14 {{colors.secondary.default.hex}}
+color7  {{colors.on_surface.default.hex}}
+color15 {{colors.on_background.default.hex}}
+EOF
+
+# Wofi colors template
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/wofi-colors.css" > /dev/null
+/* Auto-generated by matugen — do not edit by hand. */
+
+@define-color primary               {{colors.primary.default.hex}};
+@define-color on_primary            {{colors.on_primary.default.hex}};
+@define-color primary_container     {{colors.primary_container.default.hex}};
+@define-color on_primary_container  {{colors.on_primary_container.default.hex}};
+@define-color secondary             {{colors.secondary.default.hex}};
+@define-color on_secondary          {{colors.on_secondary.default.hex}};
+@define-color background            {{colors.background.default.hex}};
+@define-color on_background         {{colors.on_background.default.hex}};
+@define-color surface               {{colors.surface.default.hex}};
+@define-color on_surface            {{colors.on_surface.default.hex}};
+@define-color surface_variant       {{colors.surface_variant.default.hex}};
+@define-color on_surface_variant    {{colors.on_surface_variant.default.hex}};
+@define-color outline               {{colors.outline.default.hex}};
+@define-color outline_variant       {{colors.outline_variant.default.hex}};
+EOF
+
+# GTK colors template (shared by gtk-3.0 and gtk-4.0)
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/gtk-colors.css" > /dev/null
+/* Auto-generated by matugen. Imported by gtk.css */
+
+@define-color accent_color           {{colors.primary.default.hex}};
+@define-color accent_bg_color        {{colors.primary.default.hex}};
+@define-color accent_fg_color        {{colors.on_primary.default.hex}};
+@define-color window_bg_color        {{colors.background.default.hex}};
+@define-color window_fg_color        {{colors.on_background.default.hex}};
+@define-color view_bg_color          {{colors.surface.default.hex}};
+@define-color view_fg_color          {{colors.on_surface.default.hex}};
+@define-color headerbar_bg_color     {{colors.surface_variant.default.hex}};
+@define-color headerbar_fg_color     {{colors.on_surface_variant.default.hex}};
+@define-color headerbar_border_color {{colors.outline_variant.default.hex}};
+@define-color popover_bg_color       {{colors.surface_variant.default.hex}};
+@define-color popover_fg_color       {{colors.on_surface_variant.default.hex}};
+@define-color card_bg_color          {{colors.surface_variant.default.hex}};
+@define-color card_fg_color          {{colors.on_surface_variant.default.hex}};
+@define-color sidebar_bg_color       {{colors.surface.default.hex}};
+@define-color sidebar_fg_color       {{colors.on_surface.default.hex}};
+@define-color error_color            {{colors.error.default.hex}};
+EOF
+
+# Hyprland border colors template
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/hyprland-colors.conf" > /dev/null
+# Auto-generated by matugen — do not edit by hand.
+$active_border   = rgb({{colors.primary.default.hex_stripped}})
+$inactive_border = rgb({{colors.surface_variant.default.hex_stripped}})
+EOF
+
+# Swaync style template
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$MATUGEN_DIR/templates/swaync-style.css" > /dev/null
+/* Auto-generated by matugen — do not edit by hand. */
+
+* {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+    font-size:   13px;
+}
+
+.control-center,
+.notification-row .notification {
+    background:    {{colors.surface.default.hex}};
+    border:        1px solid {{colors.outline_variant.default.hex}};
+    border-radius: 12px;
+    color:         {{colors.on_surface.default.hex}};
+}
+
+.control-center {
+    margin:  8px;
+    padding: 8px;
+}
+
+.notification-row .notification {
+    margin:  4px 8px;
+    padding: 12px;
+}
+
+.notification-row .summary {
+    font-weight: 700;
+    color:       {{colors.on_surface.default.hex}};
+}
+
+.notification-row .body {
+    color: {{colors.on_surface_variant.default.hex}};
+}
+
+.notification-row .time {
+    color:     {{colors.on_surface_variant.default.hex}};
+    font-size: 11px;
+}
+
+.notification-row .close-button {
+    background:    {{colors.surface_variant.default.hex}};
+    color:         {{colors.on_surface_variant.default.hex}};
+    border-radius: 6px;
+    border:        none;
+    padding:       2px 6px;
+}
+
+.notification-row .close-button:hover {
+    background: {{colors.primary.default.hex}};
+    color:      {{colors.on_primary.default.hex}};
+}
+
+.notification-row.critical .notification {
+    border-color: {{colors.error.default.hex}};
+}
+
+.widget-title {
+    font-size:   15px;
+    font-weight: 700;
+    color:       {{colors.on_surface.default.hex}};
+    padding:     8px 4px;
+}
+
+.widget-dnd {
+    background:    {{colors.surface_variant.default.hex}};
+    border-radius: 8px;
+    padding:       4px 8px;
+    color:         {{colors.on_surface_variant.default.hex}};
+}
+
+.widget-dnd > switch:checked {
+    background: {{colors.primary.default.hex}};
+}
+EOF
+
+chown -R "$TARGET_USER:$TARGET_USER" "$MATUGEN_DIR"
+log "matugen config and templates written."
+
+# ---- Central wallpaper script ----
+log "--- Writing central wallpaper script ---"
+SCRIPTS_DIR_MAIN="$USER_HOME/.config/scripts"
+sudo -u "$TARGET_USER" mkdir -p "$SCRIPTS_DIR_MAIN"
+
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR_MAIN/wallpaper.sh" > /dev/null
+#!/usr/bin/env bash
+# ~/.config/scripts/wallpaper.sh
+# ─────────────────────────────────────────────────────────────────────
+# Central wallpaper + theme switcher.
+# Usage:
+#   wallpaper.sh /path/to/image.jpg         — set wallpaper + regen colors
+#   wallpaper.sh --random ~/Pictures/Walls  — pick a random image from dir
+#   wallpaper.sh --reload                   — re-run matugen on last wallpaper
+# ─────────────────────────────────────────────────────────────────────
+
+LAST_WALL_FILE="$HOME/.cache/current_wallpaper"
+
+log() { echo "[wallpaper] $*"; }
+die() { echo "[wallpaper] ERROR: $*" >&2; exit 1; }
+
+reload_waybar() {
+    if pkill -SIGUSR2 waybar 2>/dev/null; then
+        log "Waybar CSS reloaded"
+    else
+        log "Waybar not running, starting it..."
+        waybar &
+    fi
+}
+
+reload_kitty() {
+    pkill -SIGUSR1 kitty 2>/dev/null && log "Kitty reloaded" || log "No kitty instances found"
+}
+
+reload_swaync() {
+    swaync-client --reload-css 2>/dev/null && log "Swaync reloaded" || true
+}
+
+reload_hyprland() {
+    hyprctl reload 2>/dev/null && log "Hyprland reloaded" || true
+}
+
+case "$1" in
+    --reload)
+        WALLPAPER=$(cat "$LAST_WALL_FILE" 2>/dev/null)
+        [[ -z "$WALLPAPER" ]] && die "No cached wallpaper found. Set one first."
+        log "Reloading colors from cached wallpaper: $WALLPAPER"
+        ;;
+    --random)
+        DIR="${2:-$HOME/Pictures}"
+        WALLPAPER=$(find "$DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" \
+            -o -iname "*.png" -o -iname "*.webp" \) | shuf -n 1)
+        [[ -z "$WALLPAPER" ]] && die "No images found in $DIR"
+        log "Random pick: $WALLPAPER"
+        ;;
+    "")
+        die "No wallpaper specified. Usage: wallpaper.sh /path/to/image.jpg"
+        ;;
+    *)
+        WALLPAPER="$1"
+        [[ -f "$WALLPAPER" ]] || die "File not found: $WALLPAPER"
+        ;;
+esac
+
+log "Setting wallpaper: $WALLPAPER"
+swww img "$WALLPAPER" \
+    --transition-type     wipe \
+    --transition-duration 1 \
+    --transition-fps      143
+
+echo "$WALLPAPER" > "$LAST_WALL_FILE"
+
+log "Running matugen..."
+matugen image "$WALLPAPER" || die "matugen failed. Is it installed? (yay -S matugen)"
+
+sleep 0.3
+
+reload_waybar
+reload_kitty
+reload_swaync
+reload_hyprland
+
+log "Done! Theme updated from: $(basename "$WALLPAPER")"
+EOF
+
+chmod +x "$SCRIPTS_DIR_MAIN/wallpaper.sh"
+chown "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR_MAIN/wallpaper.sh"
+log "wallpaper.sh written."
+
 # ---- Fastfetch ----
 log "--- Writing fastfetch config ---"
 FASTFETCH_CONF="$USER_HOME/.config/fastfetch/config.jsonc"
@@ -580,58 +927,54 @@ window_padding_width   4
 include colors.conf
 EOF
 
+# Default colors.conf — matugen overwrites this on first wallpaper change
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$KITTY_DIR/colors.conf" > /dev/null
-cursor                #dee4e4
-cursor_text_color     #bec8c9
-foreground            #dee4e4
+# Default colors — replaced by matugen on first wallpaper change.
 background            #0e1415
-selection_foreground  #1b3437
-selection_background  #b1cbce
-url_color             #80d4dc
-
-# black
+foreground            #dee4e4
+selection_background  #80d4dc
+selection_foreground  #003735
+cursor                #80d4dc
+cursor_text_color     #003735
+url_color             #c2c4eb
 color0   #4c4c4c
 color8   #262626
-# red
 color1   #ac8a8c
 color9   #c49ea0
-# green
 color2   #8aac8b
 color10  #9ec49f
-# yellow
 color3   #aca98a
 color11  #c4c19e
-# blue
 color4   #80d4dc
 color12  #a39ec4
-# magenta
 color5   #ac8aac
 color13  #c49ec4
-# cyan
 color6   #8aacab
 color14  #9ec3c4
-# white
 color7   #f0f0f0
 color15  #e7e7e7
 EOF
+
 chown -R "$TARGET_USER:$TARGET_USER" "$KITTY_DIR"
 log "kitty config written."
 
 # ---- Waybar ----
 log "--- Writing waybar config ---"
 WAYBAR_DIR="$USER_HOME/.config/waybar"
-sudo -u "$TARGET_USER" mkdir -p "$WAYBAR_DIR"
+sudo -u "$TARGET_USER" mkdir -p "$WAYBAR_DIR/scripts"
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
+# Named 'config' (not config.json) — waybar loads this by default
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config" > /dev/null
 {
-  "layer": "bot",
+  "layer": "top",
   "spacing": 0,
   "height": 0,
-  "margin-bottom": 0,
   "margin-top": 8,
+  "margin-bottom": 0,
   "position": "top",
   "margin-right": 370,
   "margin-left": 370,
+
   "modules-left": [
     "hyprland/workspaces"
   ],
@@ -646,196 +989,229 @@ cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/config.json" > /dev/null
     "custom/weather",
     "clock"
   ],
+
   "hyprland/workspaces": {
     "disable-scroll": true,
     "all-outputs": false,
-    "tooltip": false
+    "tooltip": false,
+    "format": "{icon}",
+    "format-icons": {
+      "1": "一", "2": "二", "3": "三", "4": "四", "5": "五",
+      "6": "六", "7": "七", "8": "八", "9": "九",
+      "urgent": "", "default": "·"
+    },
+    "persistent-workspaces": {
+      "1": [], "2": [], "3": [], "4": [], "5": []
+    }
   },
+
   "custom/media": {
     "format": "󰎈 {}",
     "exec": "$HOME/.config/waybar/scripts/scroll_text.sh",
     "on-click": "playerctl -p kew play-pause",
     "tooltip": false
   },
+
   "custom/wallpaper": {
     "format": "󰋩",
     "on-click": "$HOME/.config/waybar/scripts/wallpaper_picker.sh",
     "tooltip": false
   },
+
   "custom/weather": {
     "format": "{}",
     "exec": "$HOME/.config/waybar/scripts/weather.sh",
     "interval": 900,
     "tooltip": false
   },
-  "tray": {
-    "spacing": 10,
-    "tooltip": false
-  },
-  "clock": {
-    "format": "󰅐  {:%H:%M}",
-    "tooltip": false
-  },
+
   "network": {
-    "format-wifi": "  {bandwidthDownBits}",
-    "format-ethernet": "  {bandwidthDownBits}",
+    "format-wifi":         "  {bandwidthDownBits}",
+    "format-ethernet":     "  {bandwidthDownBits}",
     "format-disconnected": "󰤮  No Network",
     "interval": 5,
     "tooltip": false
   },
+
   "pulseaudio": {
     "scroll-step": 5,
     "max-volume": 150,
-    "format": "{icon}  {volume}%",
+    "format":           "{icon}  {volume}%",
     "format-bluetooth": "{icon}  {volume}%",
-    "format-icons": [
-      "",
-      "",
-      " "
-    ],
+    "format-muted":     " ",
+    "format-icons":     ["", "", " "],
     "nospacing": 1,
-    "format-muted": "  ",
     "on-click": "pavucontrol",
+    "tooltip": false
+  },
+
+  "tray": {
+    "spacing": 10,
+    "tooltip": false
+  },
+
+  "clock": {
+    "format": "󰅐  {:%H:%M}",
     "tooltip": false
   }
 }
 EOF
 
+# style.css — imports matugen-generated colors.css
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/style.css" > /dev/null
+/* Colors live in colors.css — regenerated by matugen on wallpaper change. */
+@import "colors.css";
+
 * {
-  font-family: Maple Mono;
-  border-radius: 8px;
-  font-size: 15px;
-  padding: 0px;
-  background: transparent;
+    font-family:    "Maple Mono", "JetBrainsMono Nerd Font", monospace;
+    font-size:      13px;
+    font-weight:    500;
+    border:         none;
+    border-radius:  0;
+    min-height:     0;
+    margin:         0;
+    padding:        0;
 }
 
 window#waybar {
-  background-color: rgba(20, 18, 22, 0.7);
-  border-radius: 14px;
-  padding: 0px;
-  border-style: none;
+    background:    alpha(@surface, 0.88);
+    border:        1px solid alpha(@outline_variant, 0.35);
+    border-radius: 12px;
+    color:         @on_surface;
 }
 
-#network,
-#clock,
-#custom-media,
-#custom-weather,
-#custom-wallpaper,
-#tray,
-#workspaces,
-#pulseaudio {
-  background-color: rgba(20, 18, 22, 0.2);
-  margin: 6px;
-  margin-right: 0px;
-  padding: 2px 8px;
-  border-radius: 8px;
-  color: #d8cab8;
-  border-style: solid;
-  border-color: #d8cab8;
-  border-width: 1px;
-  transition-duration: 120ms;
-  letter-spacing: 1px;
+.modules-left,
+.modules-center,
+.modules-right {
+    background:    transparent;
+    border:        none;
+    border-radius: 0;
+    padding:       0 4px;
 }
 
-#clock {
-  margin-right: 6px;
-}
-
-#clock:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
-}
-
-#pulseaudio:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
-  transition-duration: 120ms;
-}
-
-#custom-media {
-  font-weight: bold;
-  transition-duration: 120ms;
-  padding: 0px 25px 0px 25px;
-  min-width: 280px;
-  font-family: monospace;
-  color: #ac82e9;
-  border-color: #ac82e9;
-}
-
-#custom-media:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #ac82e9;
-  transition-duration: 120ms;
-}
-
-#custom-wallpaper {
-  transition-duration: 120ms;
-  padding: 0px 8px;
-}
-
-#custom-wallpaper:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #ac82e9;
-  transition-duration: 120ms;
-}
-
-#custom-weather:hover {
-  background-color: rgba(20, 18, 22, 0.7);
-  color: #d8cab8;
-  transition-duration: 120ms;
-}
-
-#tray menu {
-  background-color: #141216;
-  color: #d8cab8;
-  padding: 4px;
-}
-
-#tray menu menuitem {
-  background-color: #27232b;
-  margin: 3px;
-  color: #d8cab8;
-  border-radius: 4px;
-  border-style: solid;
-  border-color: #27232b;
-}
-
-#tray menu menuitem:hover {
-  background-color: #27232b;
-  color: #ac82e9;
-  font-weight: bold;
+#workspaces {
+    background:  transparent;
+    padding:     0 2px;
 }
 
 #workspaces button {
-  transition-duration: 100ms;
-  all: initial;
-  min-width: 0;
-  font-weight: bold;
-  color: #d8cab8;
-  margin-right: 0.2cm;
-  margin-left: 0.2cm;
+    padding:       2px 10px;
+    margin:        4px 2px;
+    border-radius: 8px;
+    color:         @on_surface_variant;
+    background:    transparent;
+    font-size:     12px;
+    transition:    all 150ms ease;
 }
 
 #workspaces button:hover {
-  transition-duration: 120ms;
-  color: #8f56e1;
-}
-
-#workspaces button.focused {
-  color: #ac82e9;
-  font-weight: bold;
+    background:  alpha(@primary, 0.15);
+    color:       @primary;
 }
 
 #workspaces button.active {
-  color: #ac82e9;
-  font-weight: bold;
+    background:  @primary_container;
+    color:       @on_primary_container;
+    font-weight: 700;
 }
 
 #workspaces button.urgent {
-  color: #fcb167;
+    background: @error;
+    color:      @on_error;
+}
+
+#custom-media {
+    padding:        0 16px;
+    color:          @primary;
+    font-style:     italic;
+    font-size:      12px;
+    letter-spacing: 0.02em;
+    min-width:      280px;
+}
+
+#custom-wallpaper,
+#custom-weather,
+#network,
+#pulseaudio,
+#tray,
+#clock {
+    padding:    0 12px;
+    color:      @on_surface_variant;
+    transition: color 150ms ease, background 150ms ease;
+}
+
+#custom-wallpaper:hover,
+#custom-weather:hover,
+#network:hover,
+#pulseaudio:hover {
+    color:         @primary;
+    background:    alpha(@primary, 0.1);
+    border-radius: 8px;
+}
+
+#custom-wallpaper {
+    font-size: 15px;
+    color:     @secondary;
+}
+
+#custom-weather {
+    color: @tertiary;
+}
+
+#network.disconnected {
+    color: @error;
+}
+
+#pulseaudio.muted {
+    color: @error;
+}
+
+#clock {
+    color:          @on_surface;
+    font-weight:    700;
+    letter-spacing: 0.03em;
+}
+
+#tray {
+    padding: 0 8px;
+}
+
+#tray > .passive {
+    -gtk-icon-effect: dim;
+}
+
+#tray > .needs-attention {
+    -gtk-icon-effect: highlight;
+    background:       alpha(@error, 0.15);
+    border-radius:    6px;
 }
 EOF
+
+# Default colors.css — matugen overwrites on first wallpaper change
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WAYBAR_DIR/colors.css" > /dev/null
+/* Default colors — replaced by matugen on first wallpaper change. */
+@define-color primary                  #80d5d0;
+@define-color on_primary               #003735;
+@define-color primary_container        #00504d;
+@define-color on_primary_container     #b4ebff;
+@define-color secondary                #b3cad4;
+@define-color on_secondary             #1d333b;
+@define-color secondary_container      #344a52;
+@define-color on_secondary_container   #cee6f0;
+@define-color tertiary                 #c2c4eb;
+@define-color on_tertiary              #2b2e4d;
+@define-color background               #0f1416;
+@define-color on_background            #dee3e6;
+@define-color surface                  #0f1416;
+@define-color on_surface               #dee3e6;
+@define-color surface_variant          #40484b;
+@define-color on_surface_variant       #bfc8cc;
+@define-color outline                  #899296;
+@define-color outline_variant          #40484b;
+@define-color error                    #ffb4ab;
+@define-color on_error                 #690005;
+EOF
+
 chown -R "$TARGET_USER:$TARGET_USER" "$WAYBAR_DIR"
 log "waybar config written."
 
@@ -844,7 +1220,6 @@ log "--- Writing waybar scripts ---"
 SCRIPTS_DIR="$USER_HOME/.config/waybar/scripts"
 sudo -u "$TARGET_USER" mkdir -p "$SCRIPTS_DIR"
 
-# scroll_text.sh — scrolling media info for kew
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/scroll_text.sh" > /dev/null
 #!/bin/bash
 
@@ -898,12 +1273,12 @@ while true; do
 done
 EOF
 
-# weather.sh — current weather for Riverside, CA via Open-Meteo
+# weather.sh — written with placeholder coords, then injected via sed
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/weather.sh" > /dev/null
 #!/bin/bash
 
-LAT="33.9806"
-LON="-117.3755"
+LAT="WEATHER_LAT_PLACEHOLDER"
+LON="WEATHER_LON_PLACEHOLDER"
 
 # Wait for network, retry up to 10 times
 for i in $(seq 1 10); do
@@ -921,30 +1296,31 @@ temp=$(echo "$data" | grep -o '"temperature":[0-9.]*' | tail -1 | cut -d: -f2)
 code=$(echo "$data" | grep -o '"weathercode":[0-9]*' | tail -1 | cut -d: -f2)
 
 case $code in
-    0) condition="Clear"   icon="󰖙" ;;
-    1|2|3) condition="Cloudy"  icon="󰖕" ;;
-    45|48) condition="Foggy"   icon="󰖑" ;;
-    51|53|55|61|63|65) condition="Rainy"   icon="󰖗" ;;
-    71|73|75) condition="Snowy"   icon="󰼶" ;;
-    80|81|82) condition="Showers" icon="󰖖" ;;
-    95|96|99) condition="Stormy"  icon="󰖓" ;;
-    *) condition="Unknown" icon="󰖔" ;;
+    0)           condition="Clear"   icon="󰖙" ;;
+    1|2|3)       condition="Cloudy"  icon="󰖕" ;;
+    45|48)       condition="Foggy"   icon="󰖑" ;;
+    51|53|55|61|63|65) condition="Rainy" icon="󰖗" ;;
+    71|73|75)    condition="Snowy"   icon="󰼶" ;;
+    80|81|82)    condition="Showers" icon="󰖖" ;;
+    95|96|99)    condition="Stormy"  icon="󰖓" ;;
+    *)           condition="Unknown" icon="󰖔" ;;
 esac
 
 echo "$icon  ${temp}°F $condition"
 EOF
 
-# wallpaper_picker.sh — wofi image picker using swww
+# Inject user-provided coordinates
+sed -i "s|WEATHER_LAT_PLACEHOLDER|$WEATHER_LAT|" "$SCRIPTS_DIR/weather.sh"
+sed -i "s|WEATHER_LON_PLACEHOLDER|$WEATHER_LON|" "$SCRIPTS_DIR/weather.sh"
+
+# wallpaper_picker.sh — calls central wallpaper.sh so matugen fires on pick
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$SCRIPTS_DIR/wallpaper_picker.sh" > /dev/null
 #!/bin/bash
-
 WALLPAPER_DIR="$HOME/Pictures/wallpapers"
 CACHE_DIR="$HOME/.cache/wallpaper_thumbs"
 LIST_CACHE="$CACHE_DIR/wofi_list.txt"
-
 mkdir -p "$CACHE_DIR"
 
-# Rebuild list cache only if wallpaper dir is newer than cache
 if [ ! -f "$LIST_CACHE" ] || [ "$WALLPAPER_DIR" -nt "$LIST_CACHE" ]; then
     > "$LIST_CACHE"
     find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" \) | while read -r img; do
@@ -952,15 +1328,16 @@ if [ ! -f "$LIST_CACHE" ] || [ "$WALLPAPER_DIR" -nt "$LIST_CACHE" ]; then
         if [ ! -f "$thumb" ]; then
             magick "$img"[0] -thumbnail 200x200^ -gravity center -extent 200x200 "$thumb" 2>/dev/null
         fi
-        echo "img:$thumb:text:$img"
+        echo "img:$thumb:text:$(basename $img)"
     done > "$LIST_CACHE"
 fi
 
-selected=$(cat "$LIST_CACHE" | wofi --dmenu --allow-images --prompt "Wallpaper" --location=center)
+selected=$(cat "$LIST_CACHE" | wofi --dmenu --allow-images --prompt "Wallpaper" --location=top --location=center)
 
 if [ -n "$selected" ]; then
-    full_path=$(echo "$selected" | sed 's/.*text://')
-    swww img "$full_path" --transition-type wipe --transition-duration 1 --transition-fps 144
+    filename=$(echo "$selected" | sed 's/.*text://')
+    full_path="$WALLPAPER_DIR/$filename"
+    ~/.config/scripts/wallpaper.sh "$full_path"
 fi
 EOF
 
@@ -970,12 +1347,65 @@ chmod +x "$SCRIPTS_DIR/wallpaper_picker.sh"
 chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
 log "waybar scripts written."
 
+# ---- GTK 3.0 & 4.0 ----
+log "--- Writing GTK configs ---"
+GTK3_DIR="$USER_HOME/.config/gtk-3.0"
+GTK4_DIR="$USER_HOME/.config/gtk-4.0"
+sudo -u "$TARGET_USER" mkdir -p "$GTK3_DIR" "$GTK4_DIR"
+
+for GTK_DIR in "$GTK3_DIR" "$GTK4_DIR"; do
+    cat <<'EOF' | sudo -u "$TARGET_USER" tee "$GTK_DIR/gtk.css" > /dev/null
+/* Imports matugen-generated colors — regenerated on every wallpaper change. */
+@import "colors.css";
+
+@define-color theme_selected_bg_color @primary;
+@define-color theme_selected_fg_color @on_primary;
+
+headerbar {
+    background-color: @headerbar_bg_color;
+    color:            @headerbar_fg_color;
+}
+
+window,
+.background {
+    background-color: @window_bg_color;
+    color:            @window_fg_color;
+}
+EOF
+
+    # Default colors.css — matugen overwrites on first wallpaper change
+    cat <<'EOF' | sudo -u "$TARGET_USER" tee "$GTK_DIR/colors.css" > /dev/null
+/* Default colors — replaced by matugen on first wallpaper change. */
+@define-color accent_color           #80d5d0;
+@define-color accent_bg_color        #80d5d0;
+@define-color accent_fg_color        #003735;
+@define-color window_bg_color        #0f1416;
+@define-color window_fg_color        #dee3e6;
+@define-color view_bg_color          #0f1416;
+@define-color view_fg_color          #dee3e6;
+@define-color headerbar_bg_color     #40484b;
+@define-color headerbar_fg_color     #bfc8cc;
+@define-color headerbar_border_color #40484b;
+@define-color popover_bg_color       #40484b;
+@define-color popover_fg_color       #bfc8cc;
+@define-color card_bg_color          #40484b;
+@define-color card_fg_color          #bfc8cc;
+@define-color sidebar_bg_color       #0f1416;
+@define-color sidebar_fg_color       #dee3e6;
+@define-color error_color            #ffb4ab;
+EOF
+done
+
+chown -R "$TARGET_USER:$TARGET_USER" "$GTK3_DIR" "$GTK4_DIR"
+log "GTK 3.0 and 4.0 configs written."
+
 # ---- Wofi ----
 log "--- Writing wofi config ---"
 WOFI_DIR="$USER_HOME/.config/wofi"
 sudo -u "$TARGET_USER" mkdir -p "$WOFI_DIR"
 
-cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/config" > /dev/null
+# Unquoted heredoc so $USER_HOME expands for the style path
+cat << EOF | sudo -u "$TARGET_USER" tee "$WOFI_DIR/config" > /dev/null
 show=drun
 term=kitty
 show_all=true
@@ -990,76 +1420,101 @@ width=500
 no_actions=false
 prompt= Search | 검색 | Поиск | Sök
 hide_scroll=true
+style=$USER_HOME/.config/wofi/style.css
 EOF
 
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/style.css" > /dev/null
+/* Colors imported from matugen-generated colors.css */
+@import "colors.css";
+
 * {
-  font-family: Maple Mono;
-  background: transparent;
-  color: #d8cab8;
+    font-family: "Maple Mono", "JetBrainsMono Nerd Font", monospace;
+    font-size:   14px;
+    border:      none;
+    margin:      0;
+    padding:     0;
 }
 
-#window {
-  color: #d8cab8;
-  border-color: #d8cab8;
-  border-style: solid;
-  border-width: 1px;
-  background-color: rgba(20, 18, 22, 0.7);
-  border-radius: 14px;
+window {
+    background:    alpha(@background, 0.92);
+    border:        1px solid alpha(@outline_variant, 0.6);
+    border-radius: 16px;
 }
 
-#scroll {
-  border-top-style: solid;
-  border-width: 1px;
-  border-color: #d8cab8;
-}
-
-#inner-box {
-  padding-top: 12px;
-}
-
-#entry {
-  border-style: none;
-  color: #d8cab8;
-  padding: 6px;
-  margin-bottom: 8px;
-  margin-left: 12px;
-  margin-right: 12px;
-  border-radius: 8px;
-}
-#entry:selected {
-  background-color: rgba(0, 0, 0, 0.2);
-  border-style: none;
-  color: #d8cab8;
-  font-weight: bold;
-  outline: none;
+#outer-box {
+    padding: 12px;
 }
 
 #input {
-  background-color: rgba(0, 0, 0, 0.2);
-  color: #d8cab8;
-  border-color: #d8cab8;
-  border-style: none;
-  border-bottom-style: solid;
-  border-width: 1px;
-  font-style: normal;
-  border-radius: 8px;
-  border-bottom-left-radius: 0px;
-  border-bottom-right-radius: 0px;
-  padding: 12px;
-  margin: 8px;
-}
-#input:focus {
-  background-color: rgba(0, 0, 0, 0.2);
-  border-color: #ac82e9;
-  font-style: italic;
+    background:    @surface_variant;
+    color:         @on_surface;
+    border:        1px solid @outline_variant;
+    border-radius: 10px;
+    padding:       10px 14px;
+    margin-bottom: 8px;
+    caret-color:   @primary;
+    outline:       none;
 }
 
-#img {
-  padding: 4px;
-  margin-right: 6px;
+#input:focus {
+    border-color: @primary;
+    background:   alpha(@primary, 0.08);
+}
+
+#scroll {
+    margin: 0;
+}
+
+#inner-box {
+    margin: 0;
+}
+
+.entry {
+    padding:       9px 12px;
+    border-radius: 8px;
+    color:         @on_surface;
+    margin:        2px 0;
+}
+
+.entry:selected {
+    background: @primary_container;
+    color:      @on_primary_container;
+}
+
+.entry:selected .text {
+    color: @on_primary_container;
+}
+
+.text {
+    color:       @on_surface;
+    margin-left: 4px;
+}
+
+image {
+    margin-right:  10px;
+    border-radius: 6px;
 }
 EOF
+
+# Default wofi colors.css — matugen overwrites on first wallpaper change
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$WOFI_DIR/colors.css" > /dev/null
+/* Default colors — replaced by matugen on first wallpaper change. */
+@define-color primary               #80d5d0;
+@define-color on_primary            #003735;
+@define-color primary_container     #00504d;
+@define-color on_primary_container  #b4ebff;
+@define-color secondary             #b3cad4;
+@define-color on_secondary          #1d333b;
+@define-color background            #0f1416;
+@define-color on_background         #dee3e6;
+@define-color surface               #0f1416;
+@define-color on_surface            #dee3e6;
+@define-color surface_variant       #40484b;
+@define-color on_surface_variant    #bfc8cc;
+@define-color outline               #899296;
+@define-color outline_variant       #40484b;
+EOF
+
 chown -R "$TARGET_USER:$TARGET_USER" "$WOFI_DIR"
 log "wofi config written."
 
@@ -1081,6 +1536,32 @@ EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$SWAYNC_DIR"
 log "swaync config written."
 
+# ---- Hyprland initial colors.conf ----
+log "--- Writing initial hyprland colors.conf ---"
+HYPR_DIR="$USER_HOME/.config/hypr"
+sudo -u "$TARGET_USER" mkdir -p "$HYPR_DIR"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$HYPR_DIR/colors.conf" > /dev/null
+# Default border colors — replaced by matugen on first wallpaper change.
+$active_border   = rgb(80d5d0)
+$inactive_border = rgb(40484b)
+EOF
+chown "$TARGET_USER:$TARGET_USER" "$HYPR_DIR/colors.conf"
+log "hyprland colors.conf written."
+
+# ---- XDG Desktop Portal ----
+log "--- Writing xdg-desktop-portal config ---"
+XDG_PORTAL_DIR="$USER_HOME/.config/xdg-desktop-portal"
+sudo -u "$TARGET_USER" mkdir -p "$XDG_PORTAL_DIR"
+cat <<'EOF' | sudo -u "$TARGET_USER" tee "$XDG_PORTAL_DIR/hyprland-portals.conf" > /dev/null
+[preferred]
+default=hyprland;gtk
+org.freedesktop.impl.portal.FileChooser=gtk
+org.freedesktop.impl.portal.Screenshot=hyprland
+org.freedesktop.impl.portal.ScreenCast=hyprland
+EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$XDG_PORTAL_DIR"
+log "xdg-desktop-portal config written."
+
 # ---- Fastfetch on terminal open ----
 BASHRC="$USER_HOME/.bashrc"
 sudo -u "$TARGET_USER" touch "$BASHRC"
@@ -1093,13 +1574,10 @@ EOF
     log ".bashrc updated — fastfetch will run on every new terminal."
 fi
 
-# ---- Screenshots directory ----
-# Pre-create so hyprshot doesn't fail silently on first use
+# ---- Pre-create directories ----
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/Screenshots"
-
-# ---- Wallpapers directory ----
-# Pre-create so wallpaper_picker.sh doesn't fail on first use
 sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/Pictures/wallpapers"
+sudo -u "$TARGET_USER" mkdir -p "$USER_HOME/.cache/wallpaper_thumbs"
 
 # =========================================================
 # --- 16. Enable Login Manager ---
@@ -1108,7 +1586,6 @@ if ! command -v ly &> /dev/null; then
     pacman -S --needed --noconfirm ly 2>/dev/null || \
         sudo -u "$TARGET_USER" yay -S --needed --noconfirm --norebuild ly
 fi
-# ly@tty2 is the correct service name — ly runs on tty2
 systemctl enable ly@tty2
 
 echo ""
@@ -1118,30 +1595,34 @@ echo "============================================="
 echo "  CachyOS performance settings applied."
 echo "  scx systemd service manages Zen 3 scheduling."
 echo "  PipeWire user services enabled."
-echo "  swww-daemon, $HYPRPOLKIT_BIN, swaync, cliphist, kew in exec-once."
+echo "  Matugen theme pipeline fully configured."
 echo ""
 echo "  App configs written:"
-echo "    - fastfetch     → ~/.config/fastfetch/config.jsonc"
-echo "    - kitty         → ~/.config/kitty/kitty.conf + colors.conf"
-echo "    - waybar        → ~/.config/waybar/config.json + style.css"
-echo "    - waybar scripts→ scroll_text.sh, weather.sh, wallpaper_picker.sh"
-echo "    - wofi          → ~/.config/wofi/config + style.css"
-echo "    - swaync        → ~/.config/swaync/config.json (kew notifications silenced)"
-echo "    - fastfetch runs automatically on every new terminal (via .bashrc)"
-echo "    - Screenshots pre-created at ~/Pictures/Screenshots"
-echo "    - Wallpapers directory pre-created at ~/Pictures/wallpapers"
+echo "    - matugen        → ~/.config/matugen/ (config + all templates)"
+echo "    - wallpaper.sh   → ~/.config/scripts/wallpaper.sh"
+echo "    - fastfetch      → ~/.config/fastfetch/config.jsonc"
+echo "    - kitty          → ~/.config/kitty/kitty.conf + colors.conf"
+echo "    - waybar         → ~/.config/waybar/config + style.css + colors.css"
+echo "    - waybar scripts → scroll_text.sh, weather.sh, wallpaper_picker.sh"
+echo "    - wofi           → ~/.config/wofi/config + style.css + colors.css"
+echo "    - swaync         → ~/.config/swaync/config.json"
+echo "    - gtk-3.0 & 4.0  → gtk.css + colors.css"
+echo "    - hyprland       → colors.conf (default placeholder)"
+echo "    - xdg-portal     → hyprland-portals.conf"
 echo ""
 echo "  Next steps after reboot:"
 echo "    - Add wallpapers to ~/Pictures/wallpapers"
-echo "    - Set initial wallpaper: swww img /path/to/wallpaper"
+echo "    - Set initial wallpaper + generate theme:"
+echo "        ~/.config/scripts/wallpaper.sh ~/Pictures/wallpapers/yourwall.jpg"
 echo "    - Open wallpaper picker: SUPER+Z"
-echo "    - Configure Qt theming: qt6ct"
-echo "      (If KDE apps look off, re-open qt6ct and select the qt6ct-kde variant)"
+echo "    - Configure Qt theming: qt6ct → style: kvantum"
+echo "    - Configure Kvantum: kvantummanager → select a dark theme"
+echo "    - Configure GTK: nwg-look → adw-gtk3-dark + Papirus-Dark icons"
 echo "    - Test Vulkan: vkcube  |  Test VA-API: vainfo"
 echo "    - amd_pstate: cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver"
 echo "      (should read 'amd-pstate-epp')"
 echo "    - Music controls: SUPER+ALT+P/Left/Right/Up/Down via kew+playerctl"
-echo "    - ROCm / LM Studio: HSA_OVERRIDE_GFX_VERSION=11.0.0 pre-set in hyprland.conf"
+echo "    - ROCm / LM Studio: HSA_OVERRIDE_GFX_VERSION=11.0.0 pre-set"
 echo "    - Log in via ly and enjoy Hyprland"
 echo "============================================="
 echo ""
